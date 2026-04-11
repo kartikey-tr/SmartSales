@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "826929236475",
+    "project_id": "smartsales-c77d6",
+    "storage_bucket": "smartsales-c77d6.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:826929236475:android:407563d642cfee1655635e",
+        "android_client_info": {
+          "package_name": "com.torpedoes.smartsales"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAIRtVvIQ9_Eewoxv8BgLPkIXsvreqny7c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
