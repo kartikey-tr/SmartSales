@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -20,7 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.torpedoes.smartsales.data.db.model.CustomerEntity
 import com.torpedoes.smartsales.ui.theme.*
 import com.torpedoes.smartsales.ui.viewmodel.CustomersViewModel
-import androidx.compose.foundation.text.KeyboardOptions
+import com.torpedoes.smartsales.util.CreditScoreCalculator
 
 @Composable
 fun CustomersScreen(viewModel: CustomersViewModel = hiltViewModel()) {
@@ -84,44 +85,131 @@ fun CustomersScreen(viewModel: CustomersViewModel = hiltViewModel()) {
 
 @Composable
 private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete: () -> Unit) {
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    val hasCredit        = customer.totalCredit > 0.0
+    val scoreColor       = CreditScoreCalculator.scoreColor(customer.creditScore)
+    val scoreLabel       = CreditScoreCalculator.scoreLabel(customer.creditScore)
+    val outstanding      = customer.totalCredit - customer.totalCreditPaid
+
     Card(
-        shape  = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = SurfaceMid),
+        shape    = RoundedCornerShape(14.dp),
+        colors   = CardDefaults.cardColors(containerColor = SurfaceMid),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp).fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = BrandOrange.copy(alpha = 0.15f),
-                    modifier = Modifier.size(42.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            customer.name.first().uppercase(),
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = BrandOrange
-                        )
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Surface(
+                        shape    = RoundedCornerShape(50),
+                        color    = BrandOrange.copy(alpha = 0.15f),
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                customer.name.first().uppercase(),
+                                fontSize   = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color      = BrandOrange
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(customer.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = OnSurfaceLight)
+                        Text(customer.phone, fontSize = 12.sp, color = OnSurfaceMuted)
+                        if (customer.email.isNotBlank())
+                            Text(customer.email, fontSize = 12.sp, color = OnSurfaceMuted)
                     }
                 }
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(customer.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = OnSurfaceLight)
-                    Text(customer.phone, fontSize = 12.sp, color = OnSurfaceMuted)
-                    if (customer.email.isNotBlank())
-                        Text(customer.email, fontSize = 12.sp, color = OnSurfaceMuted)
+                Row {
+                    IconButton(onClick = onEdit)                      { Icon(Icons.Default.Edit,   contentDescription = "Edit",   tint = OnSurfaceMuted, modifier = Modifier.size(20.dp)) }
+                    IconButton(onClick = { showDeleteConfirm = true }) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = ErrorRed,       modifier = Modifier.size(20.dp)) }
                 }
             }
-            Row {
-                IconButton(onClick = onEdit)   { Icon(Icons.Default.Edit,   contentDescription = "Edit",   tint = OnSurfaceMuted, modifier = Modifier.size(20.dp)) }
-                IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = ErrorRed,       modifier = Modifier.size(20.dp)) }
+
+            // Credit section — only shown if customer has credit history
+            if (hasCredit) {
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = OnSurfaceMuted.copy(alpha = 0.15f))
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Credit score badge
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(
+                                progress           = { customer.creditScore / 100f },
+                                modifier           = Modifier.size(52.dp),
+                                color              = scoreColor,
+                                trackColor         = scoreColor.copy(alpha = 0.15f),
+                                strokeWidth        = 5.dp
+                            )
+                            Text(
+                                "${customer.creditScore}",
+                                fontSize   = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color      = scoreColor
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(scoreLabel, fontSize = 10.sp, color = scoreColor, fontWeight = FontWeight.SemiBold)
+                        Text("Credit Score", fontSize = 9.sp, color = OnSurfaceMuted)
+                    }
+
+                    // Credit stats
+                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        CreditStat(label = "Total Credit",   value = "₹%.2f".format(customer.totalCredit))
+                        CreditStat(label = "Repaid",         value = "₹%.2f".format(customer.totalCreditPaid))
+                        CreditStat(
+                            label = "Outstanding",
+                            value = "₹%.2f".format(outstanding),
+                            valueColor = if (outstanding > 0) ErrorRed else androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                        )
+                        if (customer.avgRepayDays > 0)
+                            CreditStat(label = "Avg Repay", value = "${customer.avgRepayDays} days")
+                    }
+                }
             }
         }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            containerColor   = SurfaceMid,
+            title  = { Text("Delete Customer?", color = OnSurfaceLight, fontWeight = FontWeight.Bold) },
+            text   = { Text("This will remove ${customer.name} from your customer list.", color = OnSurfaceMuted, fontSize = 13.sp) },
+            confirmButton = {
+                Button(
+                    onClick = { onDelete(); showDeleteConfirm = false },
+                    colors  = ButtonDefaults.buttonColors(containerColor = ErrorRed),
+                    shape   = RoundedCornerShape(10.dp)
+                ) { Text("Delete", color = OnSurfaceLight) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel", color = OnSurfaceMuted) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun CreditStat(
+    label     : String,
+    value     : String,
+    valueColor: androidx.compose.ui.graphics.Color = OnSurfaceLight
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 11.sp, color = OnSurfaceMuted)
+        Text(value, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = valueColor)
     }
 }
 
@@ -143,9 +231,9 @@ private fun CustomerDialog(
         title  = { Text(if (existing != null) "Edit Customer" else "Add Customer", color = OnSurfaceLight, fontWeight = FontWeight.Bold) },
         text   = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                DialogField(value = name,    label = "Full Name",         onChange = { name = it })
-                DialogField(value = phone,   label = "Phone Number",      onChange = { phone = it },  keyboardType = KeyboardType.Phone)
-                DialogField(value = email,   label = "Email (optional)",  onChange = { email = it },  keyboardType = KeyboardType.Email)
+                DialogField(value = name,    label = "Full Name",          onChange = { name = it })
+                DialogField(value = phone,   label = "Phone Number",       onChange = { phone = it },   keyboardType = KeyboardType.Phone)
+                DialogField(value = email,   label = "Email (optional)",   onChange = { email = it },   keyboardType = KeyboardType.Email)
                 DialogField(value = address, label = "Address (optional)", onChange = { address = it })
                 errorMessage?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
             }
@@ -171,13 +259,13 @@ private fun DialogField(
     keyboardType: KeyboardType = KeyboardType.Text
 ) {
     OutlinedTextField(
-        value         = value,
-        onValueChange = onChange,
-        label         = { Text(label) },
-        singleLine    = true,
+        value           = value,
+        onValueChange   = onChange,
+        label           = { Text(label) },
+        singleLine      = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier      = Modifier.fillMaxWidth(),
-        colors        = OutlinedTextFieldDefaults.colors(
+        modifier        = Modifier.fillMaxWidth(),
+        colors          = OutlinedTextFieldDefaults.colors(
             focusedBorderColor   = BrandOrange,
             unfocusedBorderColor = OnSurfaceMuted,
             focusedLabelColor    = BrandOrange,

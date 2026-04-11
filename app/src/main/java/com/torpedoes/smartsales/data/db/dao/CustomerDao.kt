@@ -6,8 +6,12 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface CustomerDao {
+
     @Query("SELECT * FROM customers ORDER BY name ASC")
     fun getAllCustomers(): Flow<List<CustomerEntity>>
+
+    @Query("SELECT * FROM customers WHERE name = :name LIMIT 1")
+    suspend fun getCustomerByName(name: String): CustomerEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCustomer(customer: CustomerEntity)

@@ -16,9 +16,7 @@ import com.torpedoes.smartsales.ui.screens.dashboard.DashboardScreen
 import com.torpedoes.smartsales.ui.screens.inventory.InventoryScreen
 import com.torpedoes.smartsales.ui.screens.invoices.InvoicesScreen
 import com.torpedoes.smartsales.ui.screens.orders.OrdersScreen
-import com.torpedoes.smartsales.ui.theme.BrandOrange
-import com.torpedoes.smartsales.ui.theme.OnSurfaceMuted
-import com.torpedoes.smartsales.ui.theme.SurfaceMid
+import com.torpedoes.smartsales.ui.theme.*
 
 private sealed class BottomTab(val route: String, val label: String, val icon: ImageVector) {
     object Dashboard : BottomTab("dashboard", "Home",      Icons.Default.Home)
@@ -40,6 +38,9 @@ fun MainScreen() {
     val navController = rememberNavController()
     val backStack     by navController.currentBackStackEntryAsState()
     val currentRoute  = backStack?.destination?.route
+
+    // Tracks whether the Orders tab should open its add dialog on entry
+    var openOrdersDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         bottomBar = {
@@ -73,9 +74,25 @@ fun MainScreen() {
             startDestination = BottomTab.Dashboard.route,
             modifier         = Modifier.padding(innerPadding)
         ) {
-            composable(BottomTab.Dashboard.route) { DashboardScreen() }
+            composable(BottomTab.Dashboard.route) {
+                DashboardScreen(
+                    onNavigateToOrders = {
+                        openOrdersDialog = true
+                        navController.navigate(BottomTab.Orders.route) {
+                            popUpTo(BottomTab.Dashboard.route) { saveState = true }
+                            launchSingleTop = true
+                            restoreState    = true
+                        }
+                    }
+                )
+            }
             composable(BottomTab.Inventory.route) { InventoryScreen() }
-            composable(BottomTab.Orders.route)    { OrdersScreen() }
+            composable(BottomTab.Orders.route) {
+                OrdersScreen(
+                    triggerOpenAdd = openOrdersDialog,
+                    onAddOpened    = { openOrdersDialog = false }
+                )
+            }
             composable(BottomTab.Customers.route) { CustomersScreen() }
             composable(BottomTab.Invoices.route)  { InvoicesScreen() }
         }

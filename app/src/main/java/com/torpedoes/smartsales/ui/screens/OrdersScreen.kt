@@ -4,8 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -18,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.torpedoes.smartsales.data.db.model.CustomerEntity
 import com.torpedoes.smartsales.data.db.model.OrderEntity
 import com.torpedoes.smartsales.ui.theme.*
 import com.torpedoes.smartsales.ui.viewmodel.OrdersViewModel
@@ -25,8 +28,20 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 @Composable
-fun OrdersScreen(viewModel: OrdersViewModel = hiltViewModel()) {
+fun OrdersScreen(
+    triggerOpenAdd: Boolean       = false,
+    onAddOpened   : () -> Unit    = {},
+    viewModel     : OrdersViewModel = hiltViewModel()
+) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    // Open dialog when triggered from Dashboard "New Order" button
+    LaunchedEffect(triggerOpenAdd) {
+        if (triggerOpenAdd) {
+            viewModel.openAdd()
+            onAddOpened()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -73,9 +88,12 @@ fun OrdersScreen(viewModel: OrdersViewModel = hiltViewModel()) {
 
         if (uiState.isAddOpen) {
             AddOrderDialog(
+                customers    = uiState.customers,
                 errorMessage = uiState.errorMessage,
                 onDismiss    = { viewModel.closeAdd() },
-                onConfirm    = { customer, items, total -> viewModel.addOrder(customer, items, total) }
+                onConfirm    = { customer, items, total, saveCustomer, phone ->
+                    viewModel.addOrder(customer, items, total, saveCustomer, phone)
+                }
             )
         }
     }
@@ -84,9 +102,9 @@ fun OrdersScreen(viewModel: OrdersViewModel = hiltViewModel()) {
 @Composable
 private fun OrderCard(order: OrderEntity, onStatusChange: (String) -> Unit, onDelete: () -> Unit) {
     val statusColor = when (order.status) {
-        "Completed"  -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
-        "Cancelled"  -> ErrorRed
-        else         -> BrandOrange
+        "Completed" -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
+        "Cancelled" -> ErrorRed
+        else        -> BrandOrange
     }
     var showMenu by remember { mutableStateOf(false) }
 
@@ -107,9 +125,7 @@ private fun OrderCard(order: OrderEntity, onStatusChange: (String) -> Unit, onDe
                         Text(
                             order.status,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            fontSize = 11.sp,
-                            color    = statusColor,
-                            fontWeight = FontWeight.SemiBold
+                            fontSize = 11.sp, color = statusColor, fontWeight = FontWeight.SemiBold
                         )
                     }
                     Box {
@@ -138,34 +154,118 @@ private fun OrderCard(order: OrderEntity, onStatusChange: (String) -> Unit, onDe
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddOrderDialog(
+    customers   : List<CustomerEntity>,
     errorMessage: String?,
     onDismiss   : () -> Unit,
-    onConfirm   : (String, String, String) -> Unit
+    onConfirm   : (String, String, String, Boolean, String) -> Unit
 ) {
-    var customer by remember { mutableStateOf("") }
-    var items    by remember { mutableStateOf("") }
-    var total    by remember { mutableStateOf("") }
+    var selectedCustomer     by remember { mutableStateOf<CustomerEntity?>(null) }
+    var customerName         by remember { mutableStateOf("") }
+    var customerDropdownOpen by remember { mutableStateOf(false) }
+    var isNewCustomer        by remember { mutableStateOf(false) }
+    var saveCustomer         by remember { mutableStateOf(false) }
+    var customerPhone        by remember { mutableStateOf("") }
+    var items                by remember { mutableStateOf("") }
+    var total                by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor   = SurfaceMid,
         title  = { Text("New Order", color = OnSurfaceLight, fontWeight = FontWeight.Bold) },
         text   = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                DialogField(value = customer, label = "Customer Name", onChange = { customer = it })
-                DialogField(value = items,    label = "Items (e.g. 2x Rice, 1x Oil)", onChange = { items = it })
-                DialogField(value = total,    label = "Total Amount (₹)", onChange = { total = it }, keyboardType = KeyboardType.Decimal)
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // ── Customer Dropdown ──────────────────────────────────────
+                Text("Customer", fontSize = 12.sp, color = OnSurfaceMuted)
+                ExposedDropdownMenuBox(
+                    expanded         = customerDropdownOpen,
+                    onExpandedChange = { customerDropdownOpen = it }
+                ) {
+                    OutlinedTextField(
+                        value         = if (isNewCustomer) customerName else (selectedCustomer?.name ?: ""),
+                        onValueChange = {},
+                        readOnly      = true,
+                        label         = { Text("Select Customer") },
+                        trailingIcon  = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = customerDropdownOpen) },
+                        modifier      = Modifier.menuAnchor().fillMaxWidth(),
+                        colors        = dialogFieldColors()
+                    )
+                    ExposedDropdownMenu(
+                        expanded         = customerDropdownOpen,
+                        onDismissRequest = { customerDropdownOpen = false }
+                    ) {
+                        customers.forEach { customer ->
+                            DropdownMenuItem(
+                                text    = {
+                                    Column {
+                                        Text(customer.name, color = OnSurfaceLight)
+                                        Text(customer.phone, fontSize = 11.sp, color = OnSurfaceMuted)
+                                    }
+                                },
+                                onClick = {
+                                    selectedCustomer     = customer
+                                    customerName         = customer.name
+                                    isNewCustomer        = false
+                                    saveCustomer         = false
+                                    customerPhone        = ""
+                                    customerDropdownOpen = false
+                                }
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text    = { Text("New Customer…", color = BrandOrange) },
+                            onClick = {
+                                selectedCustomer     = null
+                                customerName         = ""
+                                isNewCustomer        = true
+                                customerDropdownOpen = false
+                            }
+                        )
+                    }
+                }
+
+                if (isNewCustomer) {
+                    DialogField(value = customerName, label = "Customer Name", onChange = { customerName = it })
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked         = saveCustomer,
+                            onCheckedChange = { saveCustomer = it },
+                            colors          = CheckboxDefaults.colors(checkedColor = BrandOrange)
+                        )
+                        Text("Save to customer list", fontSize = 13.sp, color = OnSurfaceLight)
+                    }
+                    if (saveCustomer) {
+                        DialogField(
+                            value        = customerPhone,
+                            label        = "Phone Number",
+                            onChange     = { customerPhone = it },
+                            keyboardType = KeyboardType.Phone
+                        )
+                    }
+                }
+
+                // ── Items & Total ──────────────────────────────────────────
+                DialogField(value = items, label = "Items (e.g. 2x Rice, 1x Oil)", onChange = { items = it })
+                DialogField(value = total, label = "Total Amount (₹)", onChange = { total = it }, keyboardType = KeyboardType.Decimal)
+
                 errorMessage?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(customer, items, total) },
-                colors  = ButtonDefaults.buttonColors(containerColor = BrandOrange),
-                shape   = RoundedCornerShape(12.dp)
-            ) { Text("Add", color = OnSurfaceLight) }
+                onClick = {
+                    val finalName = if (isNewCustomer) customerName else (selectedCustomer?.name ?: "")
+                    onConfirm(finalName, items, total, saveCustomer && isNewCustomer, customerPhone)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = BrandOrange),
+                shape  = RoundedCornerShape(12.dp)
+            ) { Text("Add Order", color = OnSurfaceLight) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = OnSurfaceMuted) }
@@ -178,23 +278,27 @@ private fun DialogField(
     value       : String,
     label       : String,
     onChange    : (String) -> Unit,
-    keyboardType: KeyboardType = KeyboardType.Text
+    keyboardType: KeyboardType = KeyboardType.Text,
+    modifier    : Modifier = Modifier
 ) {
     OutlinedTextField(
-        value         = value,
-        onValueChange = onChange,
-        label         = { Text(label) },
-        singleLine    = true,
+        value           = value,
+        onValueChange   = onChange,
+        label           = { Text(label) },
+        singleLine      = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-        modifier      = Modifier.fillMaxWidth(),
-        colors        = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor   = BrandOrange,
-            unfocusedBorderColor = OnSurfaceMuted,
-            focusedLabelColor    = BrandOrange,
-            unfocusedLabelColor  = OnSurfaceMuted,
-            focusedTextColor     = OnSurfaceLight,
-            unfocusedTextColor   = OnSurfaceLight,
-            cursorColor          = BrandOrange
-        )
+        modifier        = modifier.fillMaxWidth(),
+        colors          = dialogFieldColors()
     )
 }
+
+@Composable
+private fun dialogFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor   = BrandOrange,
+    unfocusedBorderColor = OnSurfaceMuted,
+    focusedLabelColor    = BrandOrange,
+    unfocusedLabelColor  = OnSurfaceMuted,
+    focusedTextColor     = OnSurfaceLight,
+    unfocusedTextColor   = OnSurfaceLight,
+    cursorColor          = BrandOrange
+)

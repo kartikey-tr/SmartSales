@@ -6,8 +6,8 @@ import com.torpedoes.smartsales.data.db.dao.*
 import com.torpedoes.smartsales.data.db.model.*
 
 @Database(
-    entities = [SaleEntity::class, ProductEntity::class, OrderEntity::class, CustomerEntity::class],
-    version  = 1,
+    entities     = [SaleEntity::class, ProductEntity::class, OrderEntity::class, CustomerEntity::class],
+    version      = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
