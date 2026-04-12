@@ -1,58 +1,87 @@
 package com.torpedoes.smartsales.util
 
+import com.torpedoes.smartsales.data.db.model.CustomerEntity
+import com.torpedoes.smartsales.data.db.model.OrderEntity
 import com.torpedoes.smartsales.data.db.model.SaleEntity
 import kotlin.math.roundToInt
 
 object CreditScoreCalculator {
 
     /**
-     * Score 0–100 based on:
-     * - 60% weight: repayment ratio (paid / total credit taken)
-     * - 40% weight: repayment speed (penalised per day over 7 days)
+     * Calculates effective grace period in days for a customer.
+     * Returns 0 if no grace period set.
+     */
+    fun graceDays(customer: CustomerEntity): Int = when (customer.gracePeriodType) {
+        "Weekly"  -> 7
+        "Monthly" -> 30
+        "Custom"  -> customer.gracePeriodDays.coerceAtLeast(0)
+        else      -> 0
+    }
+
+    /**
+     * Checks if an unpaid credit item is still within grace period.
+     * If yes, it should not penalise the score.
+     */
+    private fun isWithinGrace(dateTaken: Long, graceDaysCount: Int): Boolean {
+        if (graceDaysCount <= 0) return false
+        val daysSince = ((System.currentTimeMillis() - dateTaken) / (1000L * 60 * 60 * 24)).toInt()
+        return daysSince <= graceDaysCount
+    }
+
+    /**
+     * Score 0–100:
+     * 60% weight → repayment ratio (paid / total taken), excluding grace-period items
+     * 40% weight → repayment speed (penalised per day over 7 days)
      *
-     * Returns 100 if customer has never taken credit.
+     * Returns Pair(score, avgRepayDays).
+     * Returns (100, 0) if no credit history.
      */
     fun calculate(
-        paidSales  : List<SaleEntity>,
-        unpaidSales: List<SaleEntity>
-    ): Pair<Int, Int> {  // score, avgRepayDays
+        paidSales      : List<SaleEntity>,
+        unpaidSales    : List<SaleEntity>,
+        paidOrders     : List<OrderEntity>,
+        unpaidOrders   : List<OrderEntity>,
+        customer       : CustomerEntity
+    ): Pair<Int, Int> {
 
-        val totalCreditTaken = (paidSales + unpaidSales).sumOf { it.creditAmount }
-        if (totalCreditTaken == 0.0) return Pair(100, 0)
+        val grace = graceDays(customer)
 
-        val totalPaid = paidSales.sumOf { it.creditAmount }
+        // Combine paid items
+        val totalPaid = paidSales.sumOf { it.creditAmount } +
+                paidOrders.sumOf { it.creditAmount }
+
+        // Only count unpaid items that are outside grace period as "bad debt"
+        val overdueUnpaid = unpaidSales
+            .filterNot { isWithinGrace(it.date, grace) }
+            .sumOf { it.creditAmount } +
+                unpaidOrders
+                    .filterNot { isWithinGrace(it.date, grace) }
+                    .sumOf { it.creditAmount }
+
+        val totalCreditConsidered = totalPaid + overdueUnpaid
+        if (totalCreditConsidered == 0.0) return Pair(100, 0)
 
         // Ratio score (0–60)
-        val ratioScore = ((totalPaid / totalCreditTaken) * 60).roundToInt().coerceIn(0, 60)
+        val ratioScore = ((totalPaid / totalCreditConsidered) * 60)
+            .roundToInt().coerceIn(0, 60)
 
         // Speed score (0–40)
-        // For each paid sale, calculate days taken. Ideal = 7 days or fewer = full marks.
-        // Each extra day beyond 7 costs 2 points from the speed score.
-        val speedScore = if (paidSales.isEmpty()) {
-            // Has unpaid credit but never repaid anything — speed score 0
-            0
-        } else {
-            val avgDays = paidSales
-                .filter { it.creditPaidDate != null }
-                .map { sale ->
-                    val ms   = (sale.creditPaidDate!! - sale.date).coerceAtLeast(0)
-                    (ms / (1000 * 60 * 60 * 24)).toInt()
-                }
-                .let { days -> if (days.isEmpty()) 0 else days.average().roundToInt() }
+        val repayDays = (
+                paidSales.filter { it.creditPaidDate != null }
+                    .map { ((it.creditPaidDate!! - it.date).coerceAtLeast(0) / (1000L * 60 * 60 * 24)).toInt() } +
+                        paidOrders.filter { it.creditPaidDate != null }
+                            .map { ((it.creditPaidDate!! - it.date).coerceAtLeast(0) / (1000L * 60 * 60 * 24)).toInt() }
+                )
 
+        val avgDays     = if (repayDays.isEmpty()) 0 else repayDays.average().roundToInt()
+        val speedScore  = if (repayDays.isEmpty()) {
+            if (overdueUnpaid > 0) 0 else 40
+        } else {
             val penalty = ((avgDays - 7).coerceAtLeast(0) * 2).coerceAtMost(40)
             (40 - penalty).coerceIn(0, 40)
         }
 
-        val avgRepayDays = if (paidSales.isEmpty()) 0 else paidSales
-            .filter { it.creditPaidDate != null }
-            .map { sale ->
-                val ms = (sale.creditPaidDate!! - sale.date).coerceAtLeast(0)
-                (ms / (1000 * 60 * 60 * 24)).toInt()
-            }
-            .let { days -> if (days.isEmpty()) 0 else days.average().roundToInt() }
-
-        return Pair((ratioScore + speedScore).coerceIn(0, 100), avgRepayDays)
+        return Pair((ratioScore + speedScore).coerceIn(0, 100), avgDays)
     }
 
     fun scoreLabel(score: Int): String = when {

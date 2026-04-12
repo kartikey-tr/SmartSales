@@ -5,9 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.torpedoes.smartsales.data.db.dao.CustomerDao
 import com.torpedoes.smartsales.data.db.dao.OrderDao
 import com.torpedoes.smartsales.data.db.dao.ProductDao
+import com.torpedoes.smartsales.data.db.dao.SaleDao
 import com.torpedoes.smartsales.data.db.model.CustomerEntity
 import com.torpedoes.smartsales.data.db.model.OrderEntity
 import com.torpedoes.smartsales.data.db.model.ProductEntity
+import com.torpedoes.smartsales.data.db.model.SaleEntity
+import com.torpedoes.smartsales.util.CreditScoreCalculator
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,18 +20,19 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class OrdersUiState(
-    val orders      : List<OrderEntity> = emptyList(),
-    val products    : List<ProductEntity> = emptyList(),
+    val orders      : List<OrderEntity>    = emptyList(),
+    val products    : List<ProductEntity>  = emptyList(),
     val customers   : List<CustomerEntity> = emptyList(),
-    val isAddOpen   : Boolean = false,
-    val errorMessage: String? = null
+    val isAddOpen   : Boolean              = false,
+    val errorMessage: String?              = null
 )
 
 @HiltViewModel
 class OrdersViewModel @Inject constructor(
     private val orderDao   : OrderDao,
     private val productDao : ProductDao,
-    private val customerDao: CustomerDao
+    private val customerDao: CustomerDao,
+    private val saleDao    : SaleDao
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OrdersUiState())
@@ -60,16 +64,17 @@ class OrdersViewModel @Inject constructor(
         customerName : String,
         items        : String,
         total        : String,
+        isCreditSale : Boolean,
         saveCustomer : Boolean,
         customerPhone: String
     ) {
         val t = total.toDoubleOrNull()
         when {
-            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") }; return }
-            items.isBlank()        -> { _uiState.update { it.copy(errorMessage = "Please describe the items.") };    return }
-            t == null              -> { _uiState.update { it.copy(errorMessage = "Please enter a valid total.") };   return }
+            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") };  return }
+            items.isBlank()        -> { _uiState.update { it.copy(errorMessage = "Please describe the items.") };     return }
+            t == null              -> { _uiState.update { it.copy(errorMessage = "Please enter a valid total.") };    return }
             saveCustomer && customerPhone.isBlank() -> {
-                _uiState.update { it.copy(errorMessage = "Please enter phone number to save customer.") }
+                _uiState.update { it.copy(errorMessage = "Enter phone number to save customer.") }
                 return
             }
         }
@@ -79,20 +84,19 @@ class OrdersViewModel @Inject constructor(
                 OrderEntity(
                     customerName = customerName.trim(),
                     items        = items.trim(),
-                    total        = t!!
+                    total        = t!!,
+                    isCreditSale = isCreditSale,
+                    creditAmount = if (isCreditSale) t else 0.0
                 )
             )
 
             if (saveCustomer) {
-                val alreadyExists = _uiState.value.customers.any {
+                val exists = _uiState.value.customers.any {
                     it.name.equals(customerName.trim(), ignoreCase = true)
                 }
-                if (!alreadyExists) {
+                if (!exists) {
                     customerDao.insertCustomer(
-                        CustomerEntity(
-                            name  = customerName.trim(),
-                            phone = customerPhone.trim()
-                        )
+                        CustomerEntity(name = customerName.trim(), phone = customerPhone.trim())
                     )
                 }
             }
@@ -102,10 +106,100 @@ class OrdersViewModel @Inject constructor(
     }
 
     fun updateStatus(order: OrderEntity, status: String) {
-        viewModelScope.launch { orderDao.updateOrder(order.copy(status = status)) }
+        viewModelScope.launch {
+            val updated = order.copy(status = status)
+            orderDao.updateOrder(updated)
+
+            // Auto-create sale when order is completed
+            if (status == "Completed" && !order.convertedToSale) {
+                saleDao.insertSale(
+                    SaleEntity(
+                        itemName     = order.items,
+                        quantity     = 1,
+                        pricePerUnit = order.total,
+                        total        = order.total,
+                        customerName = order.customerName,
+                        isCreditSale = order.isCreditSale,
+                        creditAmount = order.creditAmount,
+                        creditPaid   = order.creditPaid,
+                        creditPaidDate = order.creditPaidDate
+                    )
+                )
+                orderDao.updateOrder(updated.copy(convertedToSale = true))
+
+                // Update customer credit if credit order
+                if (order.isCreditSale) {
+                    recalculateCustomerCredit(order.customerName)
+                }
+            }
+        }
+    }
+
+    fun markCreditPaid(order: OrderEntity) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            orderDao.updateOrder(
+                order.copy(creditPaid = true, creditPaidDate = now)
+            )
+            // Also update the corresponding sale if it was converted
+            if (order.convertedToSale) {
+                // Find matching sale by customer name, items and date proximity
+                // Best effort match — update all unpaid credit sales for this customer
+                // that match the amount
+                val allSales = saleDao.getUnpaidCreditByCustomer(order.customerName)
+                allSales.filter { it.total == order.total }.forEach { sale ->
+                    saleDao.updateSale(sale.copy(creditPaid = true, creditPaidDate = now))
+                }
+            }
+            recalculateCustomerCredit(order.customerName)
+        }
     }
 
     fun deleteOrder(order: OrderEntity) {
-        viewModelScope.launch { orderDao.deleteOrder(order) }
+        viewModelScope.launch {
+            orderDao.deleteOrder(order)
+            if (order.isCreditSale) {
+                recalculateCustomerCredit(order.customerName)
+            }
+        }
+    }
+
+    fun updateGracePeriod(customer: CustomerEntity, type: String, customDays: Int = 0) {
+        viewModelScope.launch {
+            customerDao.updateCustomer(
+                customer.copy(
+                    gracePeriodType = type,
+                    gracePeriodDays = if (type == "Custom") customDays else 0
+                )
+            )
+            recalculateCustomerCredit(customer.name)
+        }
+    }
+
+    private suspend fun recalculateCustomerCredit(customerName: String) {
+        val customer = customerDao.getCustomerByName(customerName) ?: return
+
+        val paidSales    = saleDao.getPaidCreditByCustomer(customerName)
+        val unpaidSales  = saleDao.getUnpaidCreditByCustomer(customerName)
+        val paidOrders   = orderDao.getPaidCreditOrdersByCustomer(customerName)
+        val unpaidOrders = orderDao.getUnpaidCreditOrdersByCustomer(customerName)
+
+        val (score, avgDays) = CreditScoreCalculator.calculate(
+            paidSales, unpaidSales, paidOrders, unpaidOrders, customer
+        )
+
+        val totalCredit     = (paidSales + unpaidSales).sumOf { it.creditAmount } +
+                (paidOrders + unpaidOrders).sumOf { it.creditAmount }
+        val totalCreditPaid = paidSales.sumOf { it.creditAmount } +
+                paidOrders.sumOf { it.creditAmount }
+
+        customerDao.updateCustomer(
+            customer.copy(
+                totalCredit     = totalCredit,
+                totalCreditPaid = totalCreditPaid,
+                creditScore     = score,
+                avgRepayDays    = avgDays
+            )
+        )
     }
 }

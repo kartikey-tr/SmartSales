@@ -7,7 +7,7 @@ import com.torpedoes.smartsales.data.db.model.*
 
 @Database(
     entities     = [SaleEntity::class, ProductEntity::class, OrderEntity::class, CustomerEntity::class],
-    version      = 2,
+    version      = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

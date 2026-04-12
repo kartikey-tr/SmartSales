@@ -3,6 +3,7 @@ package com.torpedoes.smartsales.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.torpedoes.smartsales.data.db.dao.CustomerDao
+import com.torpedoes.smartsales.data.db.dao.OrderDao
 import com.torpedoes.smartsales.data.db.dao.ProductDao
 import com.torpedoes.smartsales.data.db.dao.SaleDao
 import com.torpedoes.smartsales.data.db.model.CustomerEntity
@@ -19,23 +20,24 @@ import java.util.Calendar
 import javax.inject.Inject
 
 data class DashboardUiState(
-    val todayRevenue    : Double = 0.0,
-    val todaySaleCount  : Int = 0,
-    val recentSales     : List<SaleEntity> = emptyList(),
-    val allSales        : List<SaleEntity> = emptyList(),
-    val unpaidCredit    : List<SaleEntity> = emptyList(),
-    val products        : List<ProductEntity> = emptyList(),
-    val customers       : List<CustomerEntity> = emptyList(),
-    val isAddSaleOpen   : Boolean = false,
-    val stockWarning    : String? = null,
-    val errorMessage    : String? = null
+    val todayRevenue  : Double = 0.0,
+    val todaySaleCount: Int = 0,
+    val recentSales   : List<SaleEntity> = emptyList(),
+    val allSales      : List<SaleEntity> = emptyList(),
+    val unpaidCredit  : List<SaleEntity> = emptyList(),
+    val products      : List<ProductEntity> = emptyList(),
+    val customers     : List<CustomerEntity> = emptyList(),
+    val isAddSaleOpen : Boolean = false,
+    val stockWarning  : String? = null,
+    val errorMessage  : String? = null
 )
 
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
     private val saleDao    : SaleDao,
     private val productDao : ProductDao,
-    private val customerDao: CustomerDao
+    private val customerDao: CustomerDao,
+    private val orderDao   : OrderDao
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -81,7 +83,7 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    fun openAddSale()  = _uiState.update { it.copy(isAddSaleOpen = true, errorMessage = null, stockWarning = null) }
+    fun openAddSale()  = _uiState.update { it.copy(isAddSaleOpen = true,  errorMessage = null, stockWarning = null) }
     fun closeAddSale() = _uiState.update { it.copy(isAddSaleOpen = false, errorMessage = null, stockWarning = null) }
     fun clearError()   = _uiState.update { it.copy(errorMessage = null) }
 
@@ -158,7 +160,7 @@ class DashboardViewModel @Inject constructor(
                 }
             }
 
-            // 4. Update customer credit totals if credit sale and customer exists
+            // 4. Update customer credit if credit sale
             if (isCreditSale) {
                 recalculateCustomerCredit(customerName.trim())
             }
@@ -170,15 +172,13 @@ class DashboardViewModel @Inject constructor(
     fun deleteSale(sale: SaleEntity) {
         viewModelScope.launch {
             saleDao.deleteSale(sale)
-            // Restore stock if it was an inventory item — we don't store productId on sale,
-            // so we try to match by name
+            // Restore stock — best effort match by name
             val product = _uiState.value.products.find {
                 it.name.equals(sale.itemName, ignoreCase = true)
             }
             product?.let {
                 productDao.updateProduct(it.copy(stock = it.stock + sale.quantity))
             }
-            // Recalculate credit if needed
             if (sale.isCreditSale) {
                 recalculateCustomerCredit(sale.customerName)
             }
@@ -199,13 +199,29 @@ class DashboardViewModel @Inject constructor(
 
     private suspend fun recalculateCustomerCredit(customerName: String) {
         val customer = customerDao.getCustomerByName(customerName) ?: return
-        val paid     = saleDao.getPaidCreditByCustomer(customerName)
-        val unpaid   = saleDao.getUnpaidCreditByCustomer(customerName)
-        val (score, avgDays) = CreditScoreCalculator.calculate(paid, unpaid)
+
+        val paidSales    = saleDao.getPaidCreditByCustomer(customerName)
+        val unpaidSales  = saleDao.getUnpaidCreditByCustomer(customerName)
+        val paidOrders   = orderDao.getPaidCreditOrdersByCustomer(customerName)
+        val unpaidOrders = orderDao.getUnpaidCreditOrdersByCustomer(customerName)
+
+        val (score, avgDays) = CreditScoreCalculator.calculate(
+            paidSales    = paidSales,
+            unpaidSales  = unpaidSales,
+            paidOrders   = paidOrders,
+            unpaidOrders = unpaidOrders,
+            customer     = customer
+        )
+
+        val totalCredit = (paidSales + unpaidSales).sumOf { it.creditAmount } +
+                (paidOrders + unpaidOrders).sumOf { it.creditAmount }
+        val totalCreditPaid = paidSales.sumOf { it.creditAmount } +
+                paidOrders.sumOf { it.creditAmount }
+
         customerDao.updateCustomer(
             customer.copy(
-                totalCredit     = (paid + unpaid).sumOf { it.creditAmount },
-                totalCreditPaid = paid.sumOf { it.creditAmount },
+                totalCredit     = totalCredit,
+                totalCreditPaid = totalCreditPaid,
                 creditScore     = score,
                 avgRepayDays    = avgDays
             )

@@ -6,6 +6,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.torpedoes.smartsales.data.db.AppDatabase
 import com.torpedoes.smartsales.data.db.dao.*
+import com.torpedoes.smartsales.data.remote.GeminiOrderParser
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -40,4 +41,7 @@ object AppModule {
 
     @Provides @Singleton
     fun provideCustomerDao(db: AppDatabase): CustomerDao = db.customerDao()
+
+    @Provides @Singleton
+    fun provideGeminiOrderParser(): GeminiOrderParser = GeminiOrderParser()
 }
