@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.firebase.auth.FirebaseAuth
 import com.torpedoes.smartsales.ui.theme.BrandOrange
 import com.torpedoes.smartsales.ui.theme.OnSurfaceMuted
 import kotlinx.coroutines.coroutineScope
@@ -21,8 +22,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
-fun SplashScreen(onNavigateToLogin: () -> Unit) {
-
+fun SplashScreen(
+    onNavigateToLogin     : () -> Unit,
+    onNavigateToDashboard : () -> Unit      // ← new: skip login if already signed in
+) {
     val scale = remember { Animatable(0.7f) }
     val alpha = remember { Animatable(0f) }
 
@@ -30,7 +33,7 @@ fun SplashScreen(onNavigateToLogin: () -> Unit) {
         coroutineScope {
             launch {
                 scale.animateTo(
-                    targetValue = 1f,
+                    targetValue   = 1f,
                     animationSpec = spring(
                         dampingRatio = Spring.DampingRatioMediumBouncy,
                         stiffness    = Spring.StiffnessLow
@@ -38,23 +41,30 @@ fun SplashScreen(onNavigateToLogin: () -> Unit) {
                 )
             }
             alpha.animateTo(
-                targetValue = 1f,
+                targetValue   = 1f,
                 animationSpec = tween(durationMillis = 600)
             )
         }
         delay(2000)
-        onNavigateToLogin()
+
+        // Route based on whether Firebase session is still active
+        val currentUser = FirebaseAuth.getInstance().currentUser
+        if (currentUser != null) {
+            onNavigateToDashboard()
+        } else {
+            onNavigateToLogin()
+        }
     }
 
     Box(
-        modifier = Modifier
+        modifier         = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier
+            modifier            = Modifier
                 .scale(scale.value)
                 .alpha(alpha.value)
         ) {
@@ -66,10 +76,10 @@ fun SplashScreen(onNavigateToLogin: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text      = "The Business Brain\nEvery Small Shop Needs",
-                fontSize  = 14.sp,
-                color     = OnSurfaceMuted,
-                textAlign = TextAlign.Center,
+                text       = "The Business Brain\nEvery Small Shop Needs",
+                fontSize   = 14.sp,
+                color      = OnSurfaceMuted,
+                textAlign  = TextAlign.Center,
                 lineHeight = 20.sp
             )
         }

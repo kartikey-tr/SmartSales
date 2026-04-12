@@ -24,20 +24,26 @@ fun AppNavGraph() {
                     navController.navigate(NavRoutes.LOGIN) {
                         popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }
+                },
+                onNavigateToDashboard = {                   // ← new: already logged in
+                    navController.navigate(NavRoutes.DASHBOARD) {
+                        popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                    }
                 }
             )
         }
 
         composable(
-            route = "${NavRoutes.LOGIN}?prefillEmail={prefillEmail}",
+            route     = "${NavRoutes.LOGIN}?prefillEmail={prefillEmail}",
             arguments = listOf(navArgument("prefillEmail") {
-                type = NavType.StringType; defaultValue = ""
+                type         = NavType.StringType
+                defaultValue = ""
             })
         ) { backStackEntry ->
             val prefill = backStackEntry.arguments?.getString("prefillEmail") ?: ""
             LoginScreen(
-                prefillEmail              = prefill,
-                onNavigateToDashboard     = {
+                prefillEmail               = prefill,
+                onNavigateToDashboard      = {
                     navController.navigate(NavRoutes.DASHBOARD) {
                         popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }
@@ -45,7 +51,7 @@ fun AppNavGraph() {
                 onNavigateToForgotPassword = {
                     navController.navigate(NavRoutes.FORGOT_PASSWORD)
                 },
-                onNavigateToSignUp = {
+                onNavigateToSignUp         = {
                     navController.navigate(NavRoutes.SIGN_UP)
                 }
             )
@@ -53,7 +59,7 @@ fun AppNavGraph() {
 
         composable(NavRoutes.SIGN_UP) {
             SignUpScreen(
-                onSignUpSuccess = {
+                onSignUpSuccess   = {
                     navController.navigate(NavRoutes.DASHBOARD) {
                         popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }
