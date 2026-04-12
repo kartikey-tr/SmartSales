@@ -20,16 +20,15 @@ import java.util.Calendar
 import javax.inject.Inject
 
 data class DashboardUiState(
-    val todayRevenue  : Double = 0.0,
-    val todaySaleCount: Int = 0,
-    val recentSales   : List<SaleEntity> = emptyList(),
-    val allSales      : List<SaleEntity> = emptyList(),
-    val unpaidCredit  : List<SaleEntity> = emptyList(),
-    val products      : List<ProductEntity> = emptyList(),
+    val todayRevenue  : Double               = 0.0,
+    val todaySaleCount: Int                  = 0,
+    val recentSales   : List<SaleEntity>     = emptyList(),
+    val allSales      : List<SaleEntity>     = emptyList(),
+    val unpaidCredit  : List<SaleEntity>     = emptyList(),
+    val products      : List<ProductEntity>  = emptyList(),
     val customers     : List<CustomerEntity> = emptyList(),
-    val isAddSaleOpen : Boolean = false,
-    val stockWarning  : String? = null,
-    val errorMessage  : String? = null
+    val isAddSaleOpen : Boolean              = false,
+    val errorMessage  : String?              = null
 )
 
 @HiltViewModel
@@ -45,10 +44,8 @@ class DashboardViewModel @Inject constructor(
 
     init {
         val startOfDay = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0);      set(Calendar.MILLISECOND, 0)
         }.timeInMillis
 
         viewModelScope.launch {
@@ -83,148 +80,126 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    fun openAddSale()  = _uiState.update { it.copy(isAddSaleOpen = true,  errorMessage = null, stockWarning = null) }
-    fun closeAddSale() = _uiState.update { it.copy(isAddSaleOpen = false, errorMessage = null, stockWarning = null) }
+    fun openAddSale()  = _uiState.update { it.copy(isAddSaleOpen = true,  errorMessage = null) }
+    fun closeAddSale() = _uiState.update { it.copy(isAddSaleOpen = false, errorMessage = null) }
     fun clearError()   = _uiState.update { it.copy(errorMessage = null) }
 
-    fun checkStock(productId: Int?, quantity: String) {
-        if (productId == null) { _uiState.update { it.copy(stockWarning = null) }; return }
-        val qty     = quantity.toIntOrNull() ?: return
-        val product = _uiState.value.products.find { it.id == productId } ?: return
-        _uiState.update {
-            it.copy(
-                stockWarning = if (qty > product.stock)
-                    "⚠ Only ${product.stock} units in stock. Proceeding will result in negative stock."
-                else null
-            )
-        }
-    }
-
+    /**
+     * Add one or more sale line-items in a single transaction.
+     * Each LinkedItem maps to one SaleEntity row and updates inventory accordingly.
+     * Custom items (productId == -1) are added to inventory automatically.
+     */
     fun addSale(
-        itemName     : String,
-        quantity     : String,
-        price        : String,
+        linkedItems  : List<LinkedItem>,
+        newProducts  : List<Pair<String, Double>>,   // custom items to insert in inventory
         customerName : String,
-        productId    : Int?,
         isCreditSale : Boolean,
         saveCustomer : Boolean,
         customerPhone: String
     ) {
-        val qty = quantity.toIntOrNull()
-        val ppu = price.toDoubleOrNull()
         when {
-            itemName.isBlank()     -> { _uiState.update { it.copy(errorMessage = "Please enter an item name.") };          return }
-            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") };       return }
-            qty == null || qty < 1 -> { _uiState.update { it.copy(errorMessage = "Please enter a valid quantity.") };      return }
-            ppu == null || ppu < 0 -> { _uiState.update { it.copy(errorMessage = "Please enter a valid price.") };        return }
+            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") }; return }
+            linkedItems.isEmpty()  -> { _uiState.update { it.copy(errorMessage = "Please add at least one item.") }; return }
             saveCustomer && customerPhone.isBlank() -> {
-                _uiState.update { it.copy(errorMessage = "Enter phone number to save customer.") }
-                return
+                _uiState.update { it.copy(errorMessage = "Enter phone number to save customer.") }; return
             }
         }
 
-        val total = qty!! * ppu!!
-
         viewModelScope.launch {
-            // 1. Insert sale
-            saleDao.insertSale(
-                SaleEntity(
-                    itemName     = itemName.trim(),
-                    quantity     = qty,
-                    pricePerUnit = ppu,
-                    total        = total,
-                    customerName = customerName.trim(),
-                    isCreditSale = isCreditSale,
-                    creditPaid   = false,
-                    creditAmount = if (isCreditSale) total else 0.0
-                )
-            )
-
-            // 2. Decrement stock
-            if (productId != null) {
-                val product = _uiState.value.products.find { it.id == productId }
-                product?.let {
-                    productDao.updateProduct(it.copy(stock = (it.stock - qty).coerceAtLeast(0)))
+            // 1. Insert custom products into inventory first
+            val customIdMap = mutableMapOf<String, Int>()
+            for ((name, price) in newProducts) {
+                val trimmed  = name.trim()
+                if (trimmed.isBlank()) continue
+                val existing = _uiState.value.products.find { it.name.equals(trimmed, ignoreCase = true) }
+                if (existing != null) {
+                    customIdMap[trimmed] = existing.id
+                } else {
+                    productDao.insertProduct(ProductEntity(name = trimmed, price = price, stock = 0))
+                    val inserted = productDao.getProductByName(trimmed)
+                    if (inserted != null) customIdMap[trimmed] = inserted.id
                 }
             }
 
-            // 3. Save new customer if requested
-            if (saveCustomer) {
-                val exists = _uiState.value.customers.any {
-                    it.name.equals(customerName.trim(), ignoreCase = true)
-                }
-                if (!exists) {
-                    customerDao.insertCustomer(
-                        CustomerEntity(name = customerName.trim(), phone = customerPhone.trim())
+            // 2. Resolve placeholder ids
+            val resolved = linkedItems.map { li ->
+                if (li.productId == -1) li.copy(productId = customIdMap[li.productName.trim()] ?: -1) else li
+            }
+
+            val grandTotal = resolved.sumOf { it.lineTotal }
+            val customer   = customerName.trim()
+
+            // 3. Insert one SaleEntity per line item
+            resolved.forEach { li ->
+                saleDao.insertSale(
+                    SaleEntity(
+                        itemName     = li.productName,
+                        quantity     = li.qty,
+                        pricePerUnit = li.pricePerUnit,
+                        total        = li.lineTotal,
+                        customerName = customer,
+                        isCreditSale = isCreditSale,
+                        creditPaid   = false,
+                        creditAmount = if (isCreditSale) li.lineTotal else 0.0
                     )
+                )
+            }
+
+            // 4. Deduct stock for known products
+            resolved.forEach { li ->
+                if (li.productId == -1) return@forEach
+                val product = _uiState.value.products.find { it.id == li.productId }
+                    ?: productDao.getProductByName(li.productName)
+                product?.let {
+                    productDao.updateProduct(it.copy(stock = (it.stock - li.qty).coerceAtLeast(0)))
                 }
             }
 
-            // 4. Update customer credit if credit sale
-            if (isCreditSale) {
-                recalculateCustomerCredit(customerName.trim())
+            // 5. Save new customer if requested
+            if (saveCustomer) {
+                val exists = _uiState.value.customers.any { it.name.equals(customer, ignoreCase = true) }
+                if (!exists) {
+                    customerDao.insertCustomer(CustomerEntity(name = customer, phone = customerPhone.trim()))
+                }
             }
 
-            _uiState.update { it.copy(isAddSaleOpen = false, errorMessage = null, stockWarning = null) }
+            // 6. Recalculate credit if needed
+            if (isCreditSale) recalculateCustomerCredit(customer)
+
+            _uiState.update { it.copy(isAddSaleOpen = false, errorMessage = null) }
         }
     }
 
     fun deleteSale(sale: SaleEntity) {
         viewModelScope.launch {
             saleDao.deleteSale(sale)
-            // Restore stock — best effort match by name
-            val product = _uiState.value.products.find {
-                it.name.equals(sale.itemName, ignoreCase = true)
-            }
-            product?.let {
-                productDao.updateProduct(it.copy(stock = it.stock + sale.quantity))
-            }
-            if (sale.isCreditSale) {
-                recalculateCustomerCredit(sale.customerName)
-            }
+            val product = _uiState.value.products.find { it.name.equals(sale.itemName, ignoreCase = true) }
+            product?.let { productDao.updateProduct(it.copy(stock = it.stock + sale.quantity)) }
+            if (sale.isCreditSale) recalculateCustomerCredit(sale.customerName)
         }
     }
 
     fun markCreditPaid(sale: SaleEntity) {
         viewModelScope.launch {
-            saleDao.updateSale(
-                sale.copy(
-                    creditPaid     = true,
-                    creditPaidDate = System.currentTimeMillis()
-                )
-            )
+            saleDao.updateSale(sale.copy(creditPaid = true, creditPaidDate = System.currentTimeMillis()))
             recalculateCustomerCredit(sale.customerName)
         }
     }
 
     private suspend fun recalculateCustomerCredit(customerName: String) {
-        val customer = customerDao.getCustomerByName(customerName) ?: return
-
+        val customer     = customerDao.getCustomerByName(customerName) ?: return
         val paidSales    = saleDao.getPaidCreditByCustomer(customerName)
         val unpaidSales  = saleDao.getUnpaidCreditByCustomer(customerName)
         val paidOrders   = orderDao.getPaidCreditOrdersByCustomer(customerName)
         val unpaidOrders = orderDao.getUnpaidCreditOrdersByCustomer(customerName)
 
-        val (score, avgDays) = CreditScoreCalculator.calculate(
-            paidSales    = paidSales,
-            unpaidSales  = unpaidSales,
-            paidOrders   = paidOrders,
-            unpaidOrders = unpaidOrders,
-            customer     = customer
-        )
+        val (score, avgDays) = CreditScoreCalculator.calculate(paidSales, unpaidSales, paidOrders, unpaidOrders, customer)
 
-        val totalCredit = (paidSales + unpaidSales).sumOf { it.creditAmount } +
-                (paidOrders + unpaidOrders).sumOf { it.creditAmount }
-        val totalCreditPaid = paidSales.sumOf { it.creditAmount } +
-                paidOrders.sumOf { it.creditAmount }
+        val totalCredit     = (paidSales + unpaidSales).sumOf { it.creditAmount } + (paidOrders + unpaidOrders).sumOf { it.creditAmount }
+        val totalCreditPaid = paidSales.sumOf { it.creditAmount } + paidOrders.sumOf { it.creditAmount }
 
         customerDao.updateCustomer(
-            customer.copy(
-                totalCredit     = totalCredit,
-                totalCreditPaid = totalCreditPaid,
-                creditScore     = score,
-                avgRepayDays    = avgDays
-            )
+            customer.copy(totalCredit = totalCredit, totalCreditPaid = totalCreditPaid, creditScore = score, avgRepayDays = avgDays)
         )
     }
 }

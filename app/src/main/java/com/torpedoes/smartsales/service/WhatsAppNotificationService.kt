@@ -125,16 +125,19 @@ class WhatsAppNotificationService : NotificationListenerService() {
                 return@launch
             }
 
+            // Match by last-10 phone digits OR by WhatsApp display name (title)
+            val last10           = phone?.takeLast(10)
             val allCustomers     = customerDao.getAllCustomers().first()
             val existingCustomer = allCustomers.find { customer ->
-                phone != null &&
-                        customer.phone.filter { it.isDigit() }.takeLast(10) == phone
+                (last10 != null && customer.phone.filter { it.isDigit() }.takeLast(10) == last10)
+                        || customer.name.equals(title.trim(), ignoreCase = true)
             }
 
             val customerName = existingCustomer?.name ?: run {
-                val newName = phone ?: title
-                customerDao.insertCustomer(CustomerEntity(name = newName, phone = phone ?: title))
-                Log.d(TAG, "New customer: $newName")
+                // Prefer display name over raw digits
+                val newName = if (title.any { it.isLetter() }) title.trim() else (phone ?: title.trim())
+                customerDao.insertCustomer(CustomerEntity(name = newName, phone = phone ?: ""))
+                Log.d(TAG, "New customer created: $newName")
                 newName
             }
 

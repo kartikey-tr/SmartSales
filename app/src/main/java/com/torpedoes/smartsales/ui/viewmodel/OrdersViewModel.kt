@@ -182,18 +182,25 @@ class OrdersViewModel @Inject constructor(
 
     // ── Add order (manual) ────────────────────────────────────────────────────
 
+    /**
+     * Called when the shopkeeper manually creates a new order from the home screen / orders screen.
+     * Uses the same structured line-item flow as WhatsApp order fulfillment so inventory is
+     * properly linked, deducted, and custom products are added automatically.
+     *
+     * @param linkedItems  Structured line items (same as fulfillOrder)
+     * @param newProducts  Custom products to insert into inventory (name → price)
+     */
     fun addOrder(
         customerName : String,
-        items        : String,
-        total        : String,
+        linkedItems  : List<LinkedItem>,
+        newProducts  : List<Pair<String, Double>>,
         isCreditSale : Boolean,
         saveCustomer : Boolean,
         customerPhone: String
     ) {
-        val t = total.toDoubleOrNull() ?: 0.0
         when {
-            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") };  return }
-            items.isBlank()        -> { _uiState.update { it.copy(errorMessage = "Please describe the items.") };     return }
+            customerName.isBlank() -> { _uiState.update { it.copy(errorMessage = "Please enter a customer name.") }; return }
+            linkedItems.isEmpty()  -> { _uiState.update { it.copy(errorMessage = "Please add at least one item.") }; return }
             saveCustomer && customerPhone.isBlank() -> {
                 _uiState.update { it.copy(errorMessage = "Enter phone number to save customer.") }
                 return
@@ -201,16 +208,71 @@ class OrdersViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            // 1. Insert custom products into inventory first (same logic as fulfillOrder)
+            val customIdMap = mutableMapOf<String, Int>()
+            for ((name, price) in newProducts) {
+                val trimmed = name.trim()
+                if (trimmed.isBlank()) continue
+                val existing = _uiState.value.products.find {
+                    it.name.equals(trimmed, ignoreCase = true)
+                }
+                if (existing != null) {
+                    customIdMap[trimmed] = existing.id
+                } else {
+                    productDao.insertProduct(
+                        ProductEntity(name = trimmed, price = price, stock = 0)
+                    )
+                    val inserted = productDao.getProductByName(trimmed)
+                    if (inserted != null) customIdMap[trimmed] = inserted.id
+                }
+            }
+
+            // 2. Resolve placeholder ids (-1) to real ids
+            val resolvedItems = linkedItems.map { li ->
+                if (li.productId == -1) {
+                    val realId = customIdMap[li.productName.trim()] ?: -1
+                    li.copy(productId = realId)
+                } else li
+            }
+
+            // 3. Build linked-items JSON (so "Add Items" button shows pre-filled on the order card)
+            val arr = org.json.JSONArray()
+            resolvedItems.forEach { li ->
+                arr.put(org.json.JSONObject().apply {
+                    put("productId",    li.productId)
+                    put("productName",  li.productName)
+                    put("qty",          li.qty)
+                    put("pricePerUnit", li.pricePerUnit)
+                })
+            }
+
+            val total        = resolvedItems.sumOf { it.lineTotal }
+            val itemsSummary = resolvedItems.joinToString(", ") { "${it.qty}× ${it.productName}" }
+
+            // 4. Insert the order
             orderDao.insertOrder(
                 OrderEntity(
-                    customerName = customerName.trim(),
-                    items        = items.trim(),
-                    total        = t,
-                    isCreditSale = isCreditSale,
-                    creditAmount = if (isCreditSale) t else 0.0
+                    customerName    = customerName.trim(),
+                    items           = itemsSummary,
+                    total           = total,
+                    isCreditSale    = isCreditSale,
+                    creditAmount    = if (isCreditSale) total else 0.0,
+                    linkedItemsJson = arr.toString()
                 )
             )
 
+            // 5. Deduct stock for existing products
+            resolvedItems.forEach { li ->
+                if (li.productId == -1) return@forEach
+                val product = _uiState.value.products.find { it.id == li.productId }
+                    ?: productDao.getProductByName(li.productName)
+                if (product != null) {
+                    val newStock = (product.stock - li.qty).coerceAtLeast(0)
+                    productDao.updateProduct(product.copy(stock = newStock))
+                }
+            }
+
+            // 6. Optionally save new customer
             if (saveCustomer) {
                 val exists = _uiState.value.customers.any {
                     it.name.equals(customerName.trim(), ignoreCase = true)
@@ -221,6 +283,7 @@ class OrdersViewModel @Inject constructor(
                     )
                 }
             }
+
             closeAdd()
         }
     }

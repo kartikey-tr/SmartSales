@@ -10,8 +10,11 @@ interface CustomerDao {
     @Query("SELECT * FROM customers ORDER BY name ASC")
     fun getAllCustomers(): Flow<List<CustomerEntity>>
 
-    @Query("SELECT * FROM customers WHERE name = :name LIMIT 1")
+    @Query("SELECT * FROM customers WHERE name = :name COLLATE NOCASE LIMIT 1")
     suspend fun getCustomerByName(name: String): CustomerEntity?
+
+    @Query("SELECT * FROM customers WHERE replace(replace(replace(phone,' ',''),'-',''),'+','') LIKE '%' || replace(replace(replace(:digits,' ',''),'-',''),'+','') ORDER BY id DESC LIMIT 1")
+    suspend fun getCustomerByPhoneDigits(digits: String): CustomerEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCustomer(customer: CustomerEntity)

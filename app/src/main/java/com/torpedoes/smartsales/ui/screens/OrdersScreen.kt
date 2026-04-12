@@ -116,10 +116,11 @@ fun OrdersScreen(
         if (uiState.isAddOpen) {
             AddOrderDialog(
                 customers    = uiState.customers,
+                products     = uiState.products,
                 errorMessage = uiState.errorMessage,
                 onDismiss    = { viewModel.closeAdd() },
-                onConfirm    = { customer, items, total, isCredit, saveCustomer, phone ->
-                    viewModel.addOrder(customer, items, total, isCredit, saveCustomer, phone)
+                onConfirm    = { customer, linkedItems, newProducts, isCredit, saveCustomer, phone ->
+                    viewModel.addOrder(customer, linkedItems, newProducts, isCredit, saveCustomer, phone)
                 }
             )
         }
@@ -754,16 +755,18 @@ private fun GracePeriodDialog(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Add Order Dialog (unchanged from before)
+// Add Order Dialog  — uses the same item-picker as FulfillOrderSheet
 // ─────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddOrderDialog(
     customers   : List<CustomerEntity>,
+    products    : List<ProductEntity>,
     errorMessage: String?,
     onDismiss   : () -> Unit,
-    onConfirm   : (String, String, String, Boolean, Boolean, String) -> Unit
+    // customer, linkedItems, newProducts (custom), isCredit, saveCustomer, phone
+    onConfirm   : (String, List<LinkedItem>, List<Pair<String, Double>>, Boolean, Boolean, String) -> Unit
 ) {
     var selectedCustomer     by remember { mutableStateOf<CustomerEntity?>(null) }
     var customerName         by remember { mutableStateOf("") }
@@ -771,18 +774,28 @@ private fun AddOrderDialog(
     var isNewCustomer        by remember { mutableStateOf(false) }
     var saveCustomer         by remember { mutableStateOf(false) }
     var customerPhone        by remember { mutableStateOf("") }
-    var items                by remember { mutableStateOf("") }
-    var total                by remember { mutableStateOf("") }
     var isCreditSale         by remember { mutableStateOf(false) }
+
+    // Line items — same state model as FulfillOrderSheet
+    var rows by remember { mutableStateOf(listOf(LineRow())) }
+    var localError by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor   = SurfaceMid,
-        title            = { Text("New Order", color = OnSurfaceLight, fontWeight = FontWeight.Bold) },
-        text             = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        title  = { Text("New Order", color = OnSurfaceLight, fontWeight = FontWeight.Bold) },
+        text   = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+
+                // ── Customer picker ────────────────────────────────────
                 Text("Customer", fontSize = 12.sp, color = OnSurfaceMuted)
-                ExposedDropdownMenuBox(expanded = customerDropdownOpen, onExpandedChange = { customerDropdownOpen = it }) {
+                ExposedDropdownMenuBox(
+                    expanded         = customerDropdownOpen,
+                    onExpandedChange = { customerDropdownOpen = it }
+                ) {
                     OutlinedTextField(
                         value         = if (isNewCustomer) customerName else (selectedCustomer?.name ?: ""),
                         onValueChange = {},
@@ -792,51 +805,183 @@ private fun AddOrderDialog(
                         modifier      = Modifier.menuAnchor().fillMaxWidth(),
                         colors        = dialogFieldColors()
                     )
-                    ExposedDropdownMenu(expanded = customerDropdownOpen, onDismissRequest = { customerDropdownOpen = false }) {
+                    ExposedDropdownMenu(
+                        expanded         = customerDropdownOpen,
+                        onDismissRequest = { customerDropdownOpen = false }
+                    ) {
                         customers.forEach { customer ->
                             DropdownMenuItem(
-                                text    = { Column { Text(customer.name, color = OnSurfaceLight); Text(customer.phone, fontSize = 11.sp, color = OnSurfaceMuted) } },
-                                onClick = { selectedCustomer = customer; customerName = customer.name; isNewCustomer = false; saveCustomer = false; customerPhone = ""; customerDropdownOpen = false }
+                                text    = {
+                                    Column {
+                                        Text(customer.name, color = OnSurfaceLight)
+                                        Text(customer.phone, fontSize = 11.sp, color = OnSurfaceMuted)
+                                    }
+                                },
+                                onClick = {
+                                    selectedCustomer     = customer
+                                    customerName         = customer.name
+                                    isNewCustomer        = false
+                                    saveCustomer         = false
+                                    customerPhone        = ""
+                                    customerDropdownOpen = false
+                                }
                             )
                         }
                         HorizontalDivider()
-                        DropdownMenuItem(text = { Text("New Customer…", color = BrandOrange) }, onClick = { selectedCustomer = null; customerName = ""; isNewCustomer = true; customerDropdownOpen = false })
+                        DropdownMenuItem(
+                            text    = { Text("New Customer…", color = BrandOrange) },
+                            onClick = {
+                                selectedCustomer     = null
+                                customerName         = ""
+                                isNewCustomer        = true
+                                customerDropdownOpen = false
+                            }
+                        )
                     }
                 }
 
                 if (isNewCustomer) {
-                    OutlinedTextField(value = customerName, onValueChange = { customerName = it }, label = { Text("Customer Name") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = dialogFieldColors())
+                    OutlinedTextField(
+                        value         = customerName,
+                        onValueChange = { customerName = it },
+                        label         = { Text("Customer Name") },
+                        singleLine    = true,
+                        modifier      = Modifier.fillMaxWidth(),
+                        colors        = dialogFieldColors()
+                    )
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = saveCustomer, onCheckedChange = { saveCustomer = it }, colors = CheckboxDefaults.colors(checkedColor = BrandOrange))
+                        Checkbox(
+                            checked         = saveCustomer,
+                            onCheckedChange = { saveCustomer = it },
+                            colors          = CheckboxDefaults.colors(checkedColor = BrandOrange)
+                        )
                         Text("Save to customer list", fontSize = 13.sp, color = OnSurfaceLight)
                     }
                     if (saveCustomer) {
-                        OutlinedTextField(value = customerPhone, onValueChange = { customerPhone = it }, label = { Text("Phone Number") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), modifier = Modifier.fillMaxWidth(), colors = dialogFieldColors())
+                        OutlinedTextField(
+                            value           = customerPhone,
+                            onValueChange   = { customerPhone = it },
+                            label           = { Text("Phone Number") },
+                            singleLine      = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            modifier        = Modifier.fillMaxWidth(),
+                            colors          = dialogFieldColors()
+                        )
                     }
                 }
 
-                OutlinedTextField(value = items, onValueChange = { items = it }, label = { Text("Items (e.g. 2 Rice, 1 Oil)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = dialogFieldColors())
-                OutlinedTextField(value = total, onValueChange = { total = it }, label = { Text("Total Amount ₹ (optional)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth(), colors = dialogFieldColors())
+                HorizontalDivider(color = OnSurfaceMuted.copy(alpha = 0.15f))
 
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column { Text("Credit Order", fontSize = 13.sp, color = OnSurfaceLight, fontWeight = FontWeight.SemiBold); Text("Customer pays later", fontSize = 11.sp, color = OnSurfaceMuted) }
-                    Switch(checked = isCreditSale, onCheckedChange = { isCreditSale = it }, colors = SwitchDefaults.colors(checkedThumbColor = OnSurfaceLight, checkedTrackColor = BrandOrange, uncheckedThumbColor = OnSurfaceMuted, uncheckedTrackColor = OnSurfaceMuted.copy(alpha = 0.3f)))
+                // ── Item rows — identical picker as FulfillOrderSheet ──
+                Text("Items", fontSize = 12.sp, color = OnSurfaceMuted)
+
+                rows.forEachIndexed { index, row ->
+                    LineItemRow(
+                        row               = row,
+                        products          = products,
+                        showDelete        = rows.size > 1,
+                        onProductSelected = { product ->
+                            rows = rows.toMutableList().also {
+                                if (product.id == 0) {
+                                    it[index] = row.copy(isCustom = false, product = null, customName = "", pricePerUnit = "")
+                                } else {
+                                    it[index] = row.copy(product = product, pricePerUnit = product.price.toInt().toString(), isCustom = false, customName = "")
+                                }
+                            }
+                        },
+                        onQtyChange       = { qty   -> rows = rows.toMutableList().also { it[index] = row.copy(qty = qty) } },
+                        onPriceChange     = { price -> rows = rows.toMutableList().also { it[index] = row.copy(pricePerUnit = price) } },
+                        onCustomToggled   = {
+                            rows = rows.toMutableList().also {
+                                it[index] = row.copy(isCustom = true, product = null, customName = "", pricePerUnit = "")
+                            }
+                        },
+                        onCustomNameChange = { name -> rows = rows.toMutableList().also { it[index] = row.copy(customName = name) } },
+                        onDelete           = { rows  = rows.toMutableList().also { it.removeAt(index) } }
+                    )
                 }
 
-                errorMessage?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
+                TextButton(onClick = { rows = rows + LineRow() }) {
+                    Icon(Icons.Default.Add, null, Modifier.size(16.dp), tint = BrandOrange)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add another item", color = BrandOrange, fontSize = 13.sp)
+                }
+
+                // Running total
+                val runningTotal = rows.sumOf { r ->
+                    (r.qty.toIntOrNull() ?: 0) * (r.pricePerUnit.toDoubleOrNull() ?: 0.0)
+                }
+                if (runningTotal > 0) {
+                    HorizontalDivider(color = OnSurfaceMuted.copy(alpha = 0.2f))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Order Total", fontSize = 14.sp, color = OnSurfaceMuted)
+                        Text("₹%.0f".format(runningTotal), fontSize = 17.sp, fontWeight = FontWeight.Bold, color = BrandOrange)
+                    }
+                }
+
+                HorizontalDivider(color = OnSurfaceMuted.copy(alpha = 0.15f))
+
+                // ── Credit toggle ──────────────────────────────────────
+                Row(
+                    modifier              = Modifier.fillMaxWidth(),
+                    verticalAlignment     = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column {
+                        Text("Credit Order", fontSize = 13.sp, color = OnSurfaceLight, fontWeight = FontWeight.SemiBold)
+                        Text("Customer pays later", fontSize = 11.sp, color = OnSurfaceMuted)
+                    }
+                    Switch(
+                        checked         = isCreditSale,
+                        onCheckedChange = { isCreditSale = it },
+                        colors          = SwitchDefaults.colors(
+                            checkedThumbColor   = OnSurfaceLight,
+                            checkedTrackColor   = BrandOrange,
+                            uncheckedThumbColor = OnSurfaceMuted,
+                            uncheckedTrackColor = OnSurfaceMuted.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+
+                (localError ?: errorMessage)?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    val finalName = if (isNewCustomer) customerName else (selectedCustomer?.name ?: "")
-                    onConfirm(finalName, items, total.ifBlank { "0" }, isCreditSale, saveCustomer && isNewCustomer, customerPhone)
+                    val finalCustomer = if (isNewCustomer) customerName else (selectedCustomer?.name ?: "")
+
+                    val built       = mutableListOf<LinkedItem>()
+                    val newProducts = mutableListOf<Pair<String, Double>>()
+
+                    for (row in rows) {
+                        val qty   = row.qty.toIntOrNull()?.takeIf { it > 0 } ?: continue
+                        val price = row.pricePerUnit.toDoubleOrNull()?.takeIf { it >= 0 } ?: continue
+                        if (row.isCustom) {
+                            val name = row.customName.trim()
+                            if (name.isBlank()) continue
+                            built.add(LinkedItem(-1, name, qty, price))
+                            newProducts.add(Pair(name, price))
+                        } else {
+                            val p = row.product ?: continue
+                            built.add(LinkedItem(p.id, p.name, qty, price))
+                        }
+                    }
+
+                    if (built.isEmpty()) {
+                        localError = "Please add at least one item with a valid quantity."
+                        return@Button
+                    }
+                    localError = null
+                    onConfirm(finalCustomer, built, newProducts, isCreditSale, saveCustomer && isNewCustomer, customerPhone)
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = BrandOrange),
                 shape  = RoundedCornerShape(12.dp)
             ) { Text("Add Order", color = OnSurfaceLight) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = OnSurfaceMuted) } }
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = OnSurfaceMuted) }
+        }
     )
 }
 
