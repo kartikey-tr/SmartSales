@@ -13,8 +13,11 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -30,57 +33,98 @@ class WhatsAppNotificationService : NotificationListenerService() {
     private val job   = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
 
+    // ── Rate limiting ─────────────────────────────────────────────────────────
+    private val callTimestamps      = ArrayDeque<Long>()
+    private val rateMutex           = Mutex()
+    private val MAX_CALLS_PER_MINUTE = 10   // safely under Gemini free tier's 15 RPM
+
+    // ── Deduplication ─────────────────────────────────────────────────────────
+    private val recentMessages  = LinkedHashMap<String, Long>(16, 0.75f, true)
+    private val DEDUP_WINDOW_MS = 5_000L
+
+    // ── Local keyword pre-filter ──────────────────────────────────────────────
+    private val ORDER_KEYWORDS = listOf(
+        "kg", "gram", "gm", "litre", "liter", "lt", "packet", "pack", "bottle",
+        "piece", "pcs", "box", "dozen", "bag", "order", "send", "bhejo", "chahiye",
+        "de do", "dedo", "dena", "lena", "rice", "oil", "atta", "sugar",
+        "salt", "dal", "sabji", "sabzi", "doodh", "milk", "bread", "biscuit",
+        "soap", "shampoo", "tea", "chai", "coffee", "ghee", "maida",
+        "udhaar", "credit", "baad mein", "baad me", "later", "kal dunga"
+    )
+
+    private fun looksLikeOrder(message: String): Boolean {
+        val lower = message.lowercase().trim()
+        if (lower.length <= 3) return false
+        val quantityPattern = Regex("""(\d+)\s*(x|kg|gm|gram|g|lt|ltr|litre|liter|pc|pcs|piece|packet|pack|bottle|box|dozen|bag)\b""")
+        if (quantityPattern.containsMatchIn(lower)) return true
+        return ORDER_KEYWORDS.any { lower.contains(it) }
+    }
+
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Service created — Hilt injection complete")
+        Log.d(TAG, "Service created")
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != WHATSAPP_PACKAGE) return
 
         val extras = sbn.notification.extras ?: return
-
-        // Use getCharSequence to handle SpannableString on Android 15
         val title       = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
         val messageText = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()  ?: return
 
-        Log.d(TAG, "WhatsApp notification received — from: $title | message: $messageText")
+        Log.d(TAG, "WA notification — from: $title | msg: $messageText")
 
-        // Skip WhatsApp system notifications
-        if (title.equals("WhatsApp", ignoreCase = true)) {
-            Log.d(TAG, "Skipping WhatsApp system notification")
-            return
-        }
+        if (title.equals("WhatsApp", ignoreCase = true)) return
 
-        // Skip group chats — EXTRA_SUMMARY_TEXT is only set for group notifications
         val isGroupChat = extras.getCharSequence(Notification.EXTRA_SUMMARY_TEXT) != null
-        if (isGroupChat) {
-            Log.d(TAG, "Skipping group chat notification from: $title")
+        if (isGroupChat) { Log.d(TAG, "Skipping group chat"); return }
+
+        if (title.contains("messages from", ignoreCase = true)) return
+
+        // LOCAL PRE-FILTER — skips ~80% of API calls
+        if (!looksLikeOrder(messageText)) {
+            Log.d(TAG, "Pre-filter: not an order, skipping Gemini")
             return
         }
 
-        // Skip bundle/summary notifications (e.g. "3 messages from 2 chats")
-        if (title.contains("messages from", ignoreCase = true)) {
-            Log.d(TAG, "Skipping summary notification: $title")
-            return
+        // DEDUPLICATION
+        val dedupKey = "$title:${messageText.trim()}"
+        val now      = System.currentTimeMillis()
+        synchronized(recentMessages) {
+            val lastSeen = recentMessages[dedupKey]
+            if (lastSeen != null && (now - lastSeen) < DEDUP_WINDOW_MS) {
+                Log.d(TAG, "Duplicate — skipping")
+                return
+            }
+            recentMessages[dedupKey] = now
+            if (recentMessages.size > 100) recentMessages.remove(recentMessages.keys.first())
         }
 
-        // Try to extract a 10-digit phone from the title (works when contact isn't saved)
         val phone = title.filter { it.isDigit() }.let {
             if (it.length >= 10) it.takeLast(10) else null
         }
 
         scope.launch {
-            Log.d(TAG, "Sending to Gemini parser: $messageText")
-            val parsed = geminiOrderParser.parseOrder(messageText)
+            // RATE LIMITING
+            rateMutex.withLock {
+                val windowStart = System.currentTimeMillis() - 60_000L
+                while (callTimestamps.isNotEmpty() && callTimestamps.first() < windowStart) {
+                    callTimestamps.removeFirst()
+                }
+                if (callTimestamps.size >= MAX_CALLS_PER_MINUTE) {
+                    val waitMs = (callTimestamps.first() + 60_000L) - System.currentTimeMillis() + 500L
+                    Log.w(TAG, "Rate limit reached — waiting ${waitMs}ms")
+                    delay(waitMs.coerceAtLeast(1_000L))
+                }
+                callTimestamps.addLast(System.currentTimeMillis())
+            }
 
+            val parsed = geminiOrderParser.parseOrder(messageText)
             if (parsed == null) {
-                Log.d(TAG, "Gemini returned null — not an order or parse failed. Skipping.")
+                Log.d(TAG, "Gemini: not an order. Skipping.")
                 return@launch
             }
-            Log.d(TAG, "Parsed order: items=${parsed.items}, total=${parsed.total}, credit=${parsed.isCreditSale}")
 
-            // Find or create customer
             val allCustomers     = customerDao.getAllCustomers().first()
             val existingCustomer = allCustomers.find { customer ->
                 phone != null &&
@@ -89,10 +133,8 @@ class WhatsAppNotificationService : NotificationListenerService() {
 
             val customerName = existingCustomer?.name ?: run {
                 val newName = phone ?: title
-                customerDao.insertCustomer(
-                    CustomerEntity(name = newName, phone = phone ?: title)
-                )
-                Log.d(TAG, "Created new customer: $newName")
+                customerDao.insertCustomer(CustomerEntity(name = newName, phone = phone ?: title))
+                Log.d(TAG, "New customer: $newName")
                 newName
             }
 
@@ -111,7 +153,7 @@ class WhatsAppNotificationService : NotificationListenerService() {
                     isAutoOrder  = true
                 )
             )
-            Log.d(TAG, "Order inserted successfully — customer: $customerName | items: $fullItems")
+            Log.d(TAG, "Order inserted — $customerName | $fullItems")
         }
     }
 
@@ -120,6 +162,6 @@ class WhatsAppNotificationService : NotificationListenerService() {
     override fun onDestroy() {
         super.onDestroy()
         job.cancel()
-        Log.d(TAG, "Service destroyed — coroutine job cancelled")
+        Log.d(TAG, "Service destroyed")
     }
 }

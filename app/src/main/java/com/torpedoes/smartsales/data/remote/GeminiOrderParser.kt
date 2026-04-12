@@ -1,6 +1,7 @@
 package com.torpedoes.smartsales.data.remote
 
 import android.util.Log
+import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -20,107 +21,128 @@ data class ParsedOrder(
 @Singleton
 class GeminiOrderParser @Inject constructor() {
 
-    private val TAG    = "GeminiOrderParser"
+    private val TAG    = "GroqOrderParser"
     private val client = OkHttpClient()
-    private val apiKey = com.torpedoes.smartsales.BuildConfig.GEMINI_API_KEY
+    private val apiKey = com.torpedoes.smartsales.BuildConfig.GROQ_API_KEY
 
-    // Direct REST endpoint — no SDK, no model name guessing
-    private val endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey"
+    // Groq's OpenAI-compatible endpoint — llama-3.1-8b-instant is free & fast
+    private val endpoint = "https://api.groq.com/openai/v1/chat/completions"
+    private val model    = "llama-3.1-8b-instant"
 
     suspend fun parseOrder(rawMessage: String): ParsedOrder? {
-        val prompt = """
+        val systemPrompt = """
             You are a smart order parser for a small shop management app in India.
-            A customer sent this WhatsApp message to the shopkeeper:
-
-            "$rawMessage"
-
-            Your job:
-            1. Determine if this message is a shop order. If it is NOT an order (e.g. it's a greeting, question, or unrelated message), respond with exactly: NOT_AN_ORDER
-            2. If it IS an order, extract the details and respond ONLY with a valid JSON object in this exact format (no markdown, no explanation, no code fences):
+            When given a WhatsApp message from a customer, you must:
+            1. If it is NOT an order (greeting, question, unrelated message), respond with exactly: NOT_AN_ORDER
+            2. If it IS an order, respond ONLY with a valid JSON object — no markdown, no explanation:
             {
-              "items": "formatted list of items e.g. 2x Rice (5kg), 1x Mustard Oil",
+              "items": "formatted list e.g. 2x Rice (5kg), 1x Mustard Oil",
               "total": 0,
               "isCreditSale": false,
-              "note": "any special instruction from the message"
+              "note": "any special instruction"
             }
-
             Rules:
             - Convert Hinglish/informal language to clean English item names
-            - Short messages like "2x rice" or "2kg rice" ARE valid orders — treat them as orders
+            - Short messages like "2x rice" or "2kg rice" ARE valid orders
             - If total/amount is mentioned, use it. Otherwise set total to 0
             - If message mentions "udhaar", "credit", "baad mein dunga", "later", set isCreditSale to true
-            - Keep items concise and professional
-            - Return ONLY the raw JSON object, no markdown fences, no extra text
+            - Return ONLY the raw JSON, no code fences
         """.trimIndent()
 
-        return try {
-            val requestBody = JSONObject().apply {
-                put("contents", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("parts", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("text", prompt)
-                            })
+        return tryWithRetry(rawMessage, systemPrompt, maxRetries = 3)
+    }
+
+    private suspend fun tryWithRetry(
+        rawMessage  : String,
+        systemPrompt: String,
+        maxRetries  : Int
+    ): ParsedOrder? {
+        var lastError: Exception? = null
+
+        for (attempt in 1..maxRetries) {
+            try {
+                val requestBody = JSONObject().apply {
+                    put("model", model)
+                    put("max_tokens", 256)
+                    put("temperature", 0)
+                    put("messages", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", systemPrompt)
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", rawMessage)
                         })
                     })
-                })
-            }.toString()
+                }.toString()
 
-            val request = Request.Builder()
-                .url(endpoint)
-                .post(requestBody.toRequestBody("application/json".toMediaType()))
-                .build()
+                val request = Request.Builder()
+                    .url(endpoint)
+                    .addHeader("Authorization", "Bearer $apiKey")
+                    .addHeader("Content-Type", "application/json")
+                    .post(requestBody.toRequestBody("application/json".toMediaType()))
+                    .build()
 
-            Log.d(TAG, "Calling Gemini REST API for: $rawMessage")
+                Log.d(TAG, "Groq call attempt $attempt/$maxRetries for: $rawMessage")
 
-            val response = client.newCall(request).execute()
-            val responseBody = response.body?.string()
+                val response     = client.newCall(request).execute()
+                val responseBody = response.body?.string()
 
-            Log.d(TAG, "HTTP ${response.code} — body: $responseBody")
+                // Handle rate limit — Groq returns 429 with Retry-After header
+                if (response.code == 429) {
+                    val retryAfterMs = (response.header("retry-after")?.toDoubleOrNull()
+                        ?: (attempt * 15.0)) * 1_000L
+                    Log.w(TAG, "429 from Groq — waiting ${retryAfterMs}ms (attempt $attempt)")
+                    delay(retryAfterMs.toLong())
+                    continue
+                }
 
-            if (!response.isSuccessful || responseBody == null) {
-                Log.e(TAG, "Gemini API error ${response.code}: $responseBody")
-                return null
+                if (!response.isSuccessful || responseBody == null) {
+                    Log.e(TAG, "Groq error ${response.code}: $responseBody")
+                    return null
+                }
+
+                // Parse OpenAI-compatible response format
+                val text = JSONObject(responseBody)
+                    .getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+                    .trim()
+
+                Log.d(TAG, "Groq response: $text")
+
+                if (text.equals("NOT_AN_ORDER", ignoreCase = true)) return null
+
+                val clean = text
+                    .replace(Regex("```json\\s*"), "")
+                    .replace(Regex("```\\s*"), "")
+                    .trim()
+
+                val jsonStart = clean.indexOf('{')
+                val jsonEnd   = clean.lastIndexOf('}')
+                if (jsonStart == -1 || jsonEnd == -1) {
+                    Log.w(TAG, "No JSON in response: $clean")
+                    return null
+                }
+
+                val json = JSONObject(clean.substring(jsonStart, jsonEnd + 1))
+                return ParsedOrder(
+                    items        = json.getString("items"),
+                    total        = json.optDouble("total", 0.0),
+                    isCreditSale = json.optBoolean("isCreditSale", false),
+                    note         = json.optString("note", "")
+                ).also { Log.d(TAG, "Parsed: $it") }
+
+            } catch (e: Exception) {
+                lastError = e
+                Log.e(TAG, "Attempt $attempt failed", e)
+                if (attempt < maxRetries) delay(attempt * 2_000L)
             }
-
-            // Extract text from response
-            val text = JSONObject(responseBody)
-                .getJSONArray("candidates")
-                .getJSONObject(0)
-                .getJSONObject("content")
-                .getJSONArray("parts")
-                .getJSONObject(0)
-                .getString("text")
-                .trim()
-
-            Log.d(TAG, "Gemini response text: $text")
-
-            if (text.equals("NOT_AN_ORDER", ignoreCase = true)) return null
-
-            val clean = text
-                .replace(Regex("```json\\s*"), "")
-                .replace(Regex("```\\s*"), "")
-                .trim()
-
-            val jsonStart = clean.indexOf('{')
-            val jsonEnd   = clean.lastIndexOf('}')
-            if (jsonStart == -1 || jsonEnd == -1) {
-                Log.w(TAG, "No JSON found in: $clean")
-                return null
-            }
-
-            val json = JSONObject(clean.substring(jsonStart, jsonEnd + 1))
-            ParsedOrder(
-                items        = json.getString("items"),
-                total        = json.optDouble("total", 0.0),
-                isCreditSale = json.optBoolean("isCreditSale", false),
-                note         = json.optString("note", "")
-            ).also { Log.d(TAG, "Parsed successfully: $it") }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception parsing order: $rawMessage", e)
-            null
         }
+
+        Log.e(TAG, "All $maxRetries attempts failed", lastError)
+        return null
     }
 }

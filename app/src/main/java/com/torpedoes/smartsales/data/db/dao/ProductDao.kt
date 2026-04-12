@@ -12,6 +12,10 @@ interface ProductDao {
     @Query("SELECT * FROM products WHERE stock <= 5 ORDER BY stock ASC")
     fun getLowStockProducts(): Flow<List<ProductEntity>>
 
+    // Used to resolve a freshly-inserted custom product's auto-generated ID
+    @Query("SELECT * FROM products WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getProductByName(name: String): ProductEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProduct(product: ProductEntity)
 

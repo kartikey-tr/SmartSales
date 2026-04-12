@@ -26,7 +26,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         multiDexEnabled = true
 
-        buildConfigField("String", "GEMINI_API_KEY", "\"${localProperties["GEMINI_API_KEY"] as String}\"")
+        // CHANGED: was GEMINI_API_KEY — now GROQ_API_KEY
+        buildConfigField("String", "GROQ_API_KEY", "\"${localProperties["GROQ_API_KEY"] as String}\"")
     }
 
     buildTypes {
@@ -98,7 +99,7 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
-    // Hilt — upgraded to 2.56.2 for Kotlin 2.1.0 metadata compatibility
+    // Hilt
     implementation("com.google.dagger:hilt-android:2.56.2")
     ksp("com.google.dagger:hilt-android-compiler:2.56.2")
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
@@ -108,10 +109,10 @@ dependencies {
     implementation("com.google.firebase:firebase-firestore-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
 
-    // Gemini
-    implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
+    // REMOVED: Gemini SDK — no longer needed (using Groq REST via OkHttp)
+    // implementation("com.google.ai.client.generativeai:generativeai:0.9.0")
 
-    // PDF — Android-compatible
+    // PDF
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
     // WorkManager
