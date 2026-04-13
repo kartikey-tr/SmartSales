@@ -39,7 +39,6 @@ fun MainScreen() {
     val backStack     by navController.currentBackStackEntryAsState()
     val currentRoute  = backStack?.destination?.route
 
-    // Tracks whether the Orders tab should open its add dialog on entry
     var openOrdersDialog by remember { mutableStateOf(false) }
 
     Scaffold(

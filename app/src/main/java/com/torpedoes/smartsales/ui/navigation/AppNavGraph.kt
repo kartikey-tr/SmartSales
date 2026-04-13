@@ -25,7 +25,7 @@ fun AppNavGraph() {
                         popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }
                 },
-                onNavigateToDashboard = {                   // ← new: already logged in
+                onNavigateToDashboard = {
                     navController.navigate(NavRoutes.DASHBOARD) {
                         popUpTo(NavRoutes.SPLASH) { inclusive = true }
                     }

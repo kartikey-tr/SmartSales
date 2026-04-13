@@ -27,16 +27,16 @@ class WhatsAppNotificationService : NotificationListenerService() {
     @Inject lateinit var customerDao      : CustomerDao
     @Inject lateinit var geminiOrderParser: GeminiOrderParser
 
-    private val TAG              = "WA_OrderService"
-    private val WHATSAPP_PACKAGE = "com.whatsapp"
+    private val TAG               = "WA_OrderService"
+    private val WHATSAPP_PACKAGE  = "com.whatsapp"
 
     private val job   = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
 
     // ── Rate limiting ─────────────────────────────────────────────────────────
-    private val callTimestamps      = ArrayDeque<Long>()
-    private val rateMutex           = Mutex()
-    private val MAX_CALLS_PER_MINUTE = 10   // safely under Gemini free tier's 15 RPM
+    private val callTimestamps       = ArrayDeque<Long>(16)
+    private val rateMutex            = Mutex()
+    private val MAX_CALLS_PER_MINUTE = 10
 
     // ── Deduplication ─────────────────────────────────────────────────────────
     private val recentMessages  = LinkedHashMap<String, Long>(16, 0.75f, true)
@@ -68,7 +68,7 @@ class WhatsAppNotificationService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != WHATSAPP_PACKAGE) return
 
-        val extras = sbn.notification.extras ?: return
+        val extras      = sbn.notification.extras ?: return
         val title       = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
         val messageText = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()  ?: return
 
@@ -81,13 +81,11 @@ class WhatsAppNotificationService : NotificationListenerService() {
 
         if (title.contains("messages from", ignoreCase = true)) return
 
-        // LOCAL PRE-FILTER — skips ~80% of API calls
         if (!looksLikeOrder(messageText)) {
             Log.d(TAG, "Pre-filter: not an order, skipping Gemini")
             return
         }
 
-        // DEDUPLICATION
         val dedupKey = "$title:${messageText.trim()}"
         val now      = System.currentTimeMillis()
         synchronized(recentMessages) {
@@ -105,7 +103,7 @@ class WhatsAppNotificationService : NotificationListenerService() {
         }
 
         scope.launch {
-            // RATE LIMITING
+            // Rate limiting
             rateMutex.withLock {
                 val windowStart = System.currentTimeMillis() - 60_000L
                 while (callTimestamps.isNotEmpty() && callTimestamps.first() < windowStart) {
@@ -125,16 +123,14 @@ class WhatsAppNotificationService : NotificationListenerService() {
                 return@launch
             }
 
-            // Match by last-10 phone digits OR by WhatsApp display name (title)
-            val last10           = phone?.takeLast(10)
-            val allCustomers     = customerDao.getAllCustomers().first()
-            val existingCustomer = allCustomers.find { customer ->
+            val last10            = phone?.takeLast(10)
+            val allCustomers      = customerDao.getAllCustomers().first()
+            val existingCustomer  = allCustomers.find { customer ->
                 (last10 != null && customer.phone.filter { it.isDigit() }.takeLast(10) == last10)
                         || customer.name.equals(title.trim(), ignoreCase = true)
             }
 
             val customerName = existingCustomer?.name ?: run {
-                // Prefer display name over raw digits
                 val newName = if (title.any { it.isLetter() }) title.trim() else (phone ?: title.trim())
                 customerDao.insertCustomer(CustomerEntity(name = newName, phone = phone ?: ""))
                 Log.d(TAG, "New customer created: $newName")
@@ -146,17 +142,22 @@ class WhatsAppNotificationService : NotificationListenerService() {
             else
                 parsed.items
 
+            // Credit amount: if isCreditSale and total is known, use total.
+            // If total is 0 (price pending), creditAmount stays 0 and will be
+            // updated when the shopkeeper fulfills the order via the Add Items sheet.
+            val creditAmount = if (parsed.isCreditSale && parsed.total > 0) parsed.total else 0.0
+
             orderDao.insertOrder(
                 OrderEntity(
                     customerName = customerName,
                     items        = fullItems,
                     total        = parsed.total,
                     isCreditSale = parsed.isCreditSale,
-                    creditAmount = if (parsed.isCreditSale) parsed.total else 0.0,
+                    creditAmount = creditAmount,
                     isAutoOrder  = true
                 )
             )
-            Log.d(TAG, "Order inserted — $customerName | $fullItems")
+            Log.d(TAG, "Order inserted — $customerName | $fullItems | credit=${ parsed.isCreditSale}")
         }
     }
 

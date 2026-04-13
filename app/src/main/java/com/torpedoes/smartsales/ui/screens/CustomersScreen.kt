@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -61,9 +62,10 @@ fun CustomersScreen(viewModel: CustomersViewModel = hiltViewModel()) {
                 ) {
                     items(uiState.customers, key = { it.id }) { customer ->
                         CustomerCard(
-                            customer = customer,
-                            onEdit   = { viewModel.openEdit(customer) },
-                            onDelete = { viewModel.deleteCustomer(customer) }
+                            customer          = customer,
+                            onEdit            = { viewModel.openEdit(customer) },
+                            onDelete          = { viewModel.deleteCustomer(customer) },
+                            onGracePeriodSave = { type, days -> viewModel.updateGracePeriod(customer, type, days) }
                         )
                     }
                 }
@@ -84,12 +86,18 @@ fun CustomersScreen(viewModel: CustomersViewModel = hiltViewModel()) {
 }
 
 @Composable
-private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete: () -> Unit) {
+private fun CustomerCard(
+    customer         : CustomerEntity,
+    onEdit           : () -> Unit,
+    onDelete         : () -> Unit,
+    onGracePeriodSave: (String, Int) -> Unit
+) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    val hasCredit        = customer.totalCredit > 0.0
-    val scoreColor       = CreditScoreCalculator.scoreColor(customer.creditScore)
-    val scoreLabel       = CreditScoreCalculator.scoreLabel(customer.creditScore)
-    val outstanding      = customer.totalCredit - customer.totalCreditPaid
+    var showGraceDialog   by remember { mutableStateOf(false) }
+    val hasCredit         = customer.totalCredit > 0.0
+    val scoreColor        = CreditScoreCalculator.scoreColor(customer.creditScore)
+    val scoreLabel        = CreditScoreCalculator.scoreLabel(customer.creditScore)
+    val outstanding       = customer.totalCredit - customer.totalCreditPaid
 
     Card(
         shape    = RoundedCornerShape(14.dp),
@@ -97,6 +105,7 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -131,9 +140,42 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
                 }
             }
 
-            // Credit section — only shown if customer has credit history
+            // Grace period row — always visible
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Timer, null, tint = Color(0xFF4CAF50), modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = when (customer.gracePeriodType) {
+                            "Weekly"  -> "Grace: Weekly (7 days)"
+                            "Monthly" -> "Grace: Monthly (30 days)"
+                            "Custom"  -> "Grace: ${customer.gracePeriodDays} days"
+                            else      -> "No grace period"
+                        },
+                        fontSize = 12.sp,
+                        color    = if (customer.gracePeriodType == "None") OnSurfaceMuted else Color(0xFF4CAF50)
+                    )
+                }
+                TextButton(
+                    onClick        = { showGraceDialog = true },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        if (customer.gracePeriodType == "None") "Set" else "Edit",
+                        fontSize = 11.sp,
+                        color    = BrandOrange
+                    )
+                }
+            }
+
+            // Credit section
             if (hasCredit) {
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
                 HorizontalDivider(color = OnSurfaceMuted.copy(alpha = 0.15f))
                 Spacer(Modifier.height(10.dp))
 
@@ -142,15 +184,14 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Credit score badge
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(contentAlignment = Alignment.Center) {
                             CircularProgressIndicator(
-                                progress           = { customer.creditScore / 100f },
-                                modifier           = Modifier.size(52.dp),
-                                color              = scoreColor,
-                                trackColor         = scoreColor.copy(alpha = 0.15f),
-                                strokeWidth        = 5.dp
+                                progress    = { customer.creditScore / 100f },
+                                modifier    = Modifier.size(52.dp),
+                                color       = scoreColor,
+                                trackColor  = scoreColor.copy(alpha = 0.15f),
+                                strokeWidth = 5.dp
                             )
                             Text(
                                 "${customer.creditScore}",
@@ -160,18 +201,20 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
                             )
                         }
                         Spacer(Modifier.height(4.dp))
-                        Text(scoreLabel, fontSize = 10.sp, color = scoreColor, fontWeight = FontWeight.SemiBold)
-                        Text("Credit Score", fontSize = 9.sp, color = OnSurfaceMuted)
+                        Text(scoreLabel,     fontSize = 10.sp, color = scoreColor,    fontWeight = FontWeight.SemiBold)
+                        Text("Credit Score", fontSize = 9.sp,  color = OnSurfaceMuted)
                     }
 
-                    // Credit stats
-                    Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        CreditStat(label = "Total Credit",   value = "₹%.2f".format(customer.totalCredit))
-                        CreditStat(label = "Repaid",         value = "₹%.2f".format(customer.totalCreditPaid))
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        CreditStat(label = "Total Credit", value = "₹%.2f".format(customer.totalCredit))
+                        CreditStat(label = "Repaid",       value = "₹%.2f".format(customer.totalCreditPaid))
                         CreditStat(
-                            label = "Outstanding",
-                            value = "₹%.2f".format(outstanding),
-                            valueColor = if (outstanding > 0) ErrorRed else androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                            label      = "Outstanding",
+                            value      = "₹%.2f".format(outstanding),
+                            valueColor = if (outstanding > 0) ErrorRed else Color(0xFF4CAF50)
                         )
                         if (customer.avgRepayDays > 0)
                             CreditStat(label = "Avg Repay", value = "${customer.avgRepayDays} days")
@@ -179,6 +222,14 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
                 }
             }
         }
+    }
+
+    if (showGraceDialog) {
+        GracePeriodDialog(
+            customer  = customer,
+            onDismiss = { showGraceDialog = false },
+            onConfirm = { type, days -> onGracePeriodSave(type, days); showGraceDialog = false }
+        )
     }
 
     if (showDeleteConfirm) {
@@ -202,10 +253,97 @@ private fun CustomerCard(customer: CustomerEntity, onEdit: () -> Unit, onDelete:
 }
 
 @Composable
+private fun GracePeriodDialog(
+    customer : CustomerEntity,
+    onDismiss: () -> Unit,
+    onConfirm: (String, Int) -> Unit
+) {
+    var selectedType by remember { mutableStateOf(customer.gracePeriodType) }
+    var customDays   by remember { mutableStateOf(customer.gracePeriodDays.toString()) }
+    val options      = listOf("None", "Weekly", "Monthly", "Custom")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor   = SurfaceMid,
+        title            = {
+            Text(
+                "Grace Period — ${customer.name}",
+                color      = OnSurfaceLight,
+                fontWeight = FontWeight.Bold,
+                fontSize   = 15.sp
+            )
+        },
+        text             = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "How long does this customer have to repay credit before their score is affected?",
+                    fontSize   = 12.sp,
+                    color      = OnSurfaceMuted,
+                    lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                options.forEach { option ->
+                    Row(
+                        modifier          = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedType == option,
+                            onClick  = { selectedType = option },
+                            colors   = RadioButtonDefaults.colors(selectedColor = BrandOrange)
+                        )
+                        Text(
+                            when (option) {
+                                "Weekly"  -> "Weekly (7 days)"
+                                "Monthly" -> "Monthly (30 days)"
+                                "Custom"  -> "Custom number of days"
+                                else      -> "None (score affected immediately)"
+                            },
+                            fontSize = 13.sp,
+                            color    = OnSurfaceLight
+                        )
+                    }
+                }
+                if (selectedType == "Custom") {
+                    OutlinedTextField(
+                        value           = customDays,
+                        onValueChange   = { customDays = it },
+                        label           = { Text("Number of days") },
+                        singleLine      = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier        = Modifier.fillMaxWidth(),
+                        colors          = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = BrandOrange,
+                            unfocusedBorderColor = OnSurfaceMuted,
+                            focusedLabelColor    = BrandOrange,
+                            unfocusedLabelColor  = OnSurfaceMuted,
+                            focusedTextColor     = OnSurfaceLight,
+                            unfocusedTextColor   = OnSurfaceLight,
+                            cursorColor          = BrandOrange
+                        )
+                    )
+                }
+            }
+        },
+        confirmButton    = {
+            Button(
+                onClick = {
+                    val days = if (selectedType == "Custom") customDays.toIntOrNull() ?: 0 else 0
+                    onConfirm(selectedType, days)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = BrandOrange),
+                shape  = RoundedCornerShape(12.dp)
+            ) { Text("Save", color = OnSurfaceLight) }
+        },
+        dismissButton    = { TextButton(onClick = onDismiss) { Text("Cancel", color = OnSurfaceMuted) } }
+    )
+}
+
+@Composable
 private fun CreditStat(
     label     : String,
     value     : String,
-    valueColor: androidx.compose.ui.graphics.Color = OnSurfaceLight
+    valueColor: Color = OnSurfaceLight
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontSize = 11.sp, color = OnSurfaceMuted)
