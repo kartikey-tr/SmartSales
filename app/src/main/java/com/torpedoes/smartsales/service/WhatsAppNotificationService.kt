@@ -14,7 +14,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -123,28 +122,41 @@ class WhatsAppNotificationService : NotificationListenerService() {
                 return@launch
             }
 
-            val last10            = phone?.takeLast(10)
-            val allCustomers      = customerDao.getAllCustomers().first()
-            val existingCustomer  = allCustomers.find { customer ->
-                (last10 != null && customer.phone.filter { it.isDigit() }.takeLast(10) == last10)
-                        || customer.name.equals(title.trim(), ignoreCase = true)
+            // ── Customer lookup ───────────────────────────────────────────────
+            // Step 1: try matching by phone digits using the dedicated DAO query
+            // Step 2: fallback to matching by display name
+            // Step 3: if no match, create new customer
+            // Using getAllCustomersDirect() — plain suspend query, not a Flow,
+            // guaranteed to return current DB state in a background coroutine.
+
+            val existingCustomer: CustomerEntity? = when {
+                phone != null -> {
+                    // Use the DAO's phone-digit query first (most reliable)
+                    customerDao.getCustomerByPhoneDigits(phone)
+                    // If that returns null, fallback to name match
+                        ?: customerDao.getCustomerByName(title.trim())
+                }
+                else -> {
+                    // No phone digits in title — match by display name only
+                    customerDao.getCustomerByName(title.trim())
+                }
             }
 
             val customerName = existingCustomer?.name ?: run {
+                // No existing customer found — create one
                 val newName = if (title.any { it.isLetter() }) title.trim() else (phone ?: title.trim())
                 customerDao.insertCustomer(CustomerEntity(name = newName, phone = phone ?: ""))
-                Log.d(TAG, "New customer created: $newName")
+                Log.d(TAG, "New customer created: $newName | phone: ${phone ?: "unknown"}")
                 newName
             }
+
+            Log.d(TAG, "Customer resolved: $customerName (existing=${existingCustomer != null})")
 
             val fullItems = if (parsed.note.isNotBlank())
                 "${parsed.items} [Note: ${parsed.note}]"
             else
                 parsed.items
 
-            // Credit amount: if isCreditSale and total is known, use total.
-            // If total is 0 (price pending), creditAmount stays 0 and will be
-            // updated when the shopkeeper fulfills the order via the Add Items sheet.
             val creditAmount = if (parsed.isCreditSale && parsed.total > 0) parsed.total else 0.0
 
             orderDao.insertOrder(
@@ -157,7 +169,7 @@ class WhatsAppNotificationService : NotificationListenerService() {
                     isAutoOrder  = true
                 )
             )
-            Log.d(TAG, "Order inserted — $customerName | $fullItems | credit=${ parsed.isCreditSale}")
+            Log.d(TAG, "Order inserted — $customerName | $fullItems | credit=${parsed.isCreditSale}")
         }
     }
 
